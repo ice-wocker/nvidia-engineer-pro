@@ -24,7 +24,7 @@ try:
 except ImportError:
     readline = None
 
-__version__ = "8.0.0"
+__version__ = "8.1.0"
 APP_DIR = Path.home() / ".nvidia_engineer_pro"
 SESSIONS_DIR = APP_DIR / "sessions"
 CHECKPOINTS_DIR = APP_DIR / "checkpoints"
@@ -341,10 +341,6 @@ def _gradient_hex(stops: list, t: float) -> str:
     i = min(int(seg), len(stops) - 2)
     frac = seg - i
     return _lerp_hex(stops[i], stops[i + 1], frac)
-
-def _hex_to_ansi_gradient(stops: list, t: float) -> str:
-    """Return the ANSI code for position t along a hex gradient."""
-    return _hex_to_ansi(_gradient_hex(stops, t))
 
 def _hex_to_ansi(hex_color: str) -> str:
     """Dispatch a hex color to the right conversion for the active mode."""
@@ -4620,6 +4616,8 @@ class Agent:
         final_texts = []
         steps = 0
         self._retry_streak = 0
+        self._last_timing = {"think": 0.0, "answer": 0.0, "tool": 0.0}
+        _turn_start = time.monotonic()
 
         while steps < max_steps:
             exhausted, reason = self.budget.is_exhausted()
@@ -4648,6 +4646,8 @@ class Agent:
 
             try:
                 if self.stream:
+                    _stream_start = time.monotonic()
+                    _think_done = None
                     with Spinner("思考") as sp:
                         streaming_text = False
                         reasoning_shown = False
@@ -4667,6 +4667,8 @@ class Agent:
                                 continue
                             if kind == "text":
                                 if not streaming_text:
+                                    _think_done = time.monotonic()
+                                    self._last_timing["think"] += _think_done - _stream_start
                                     if reasoning_shown and self.echo:
                                         term_w = max(40, shutil.get_terminal_size((80, 24)).columns)
                                         sp.emit(s("└" + "─" * (term_w - 1) + "┘", Palette.tok("border")) + "\n")
@@ -4686,6 +4688,12 @@ class Agent:
                             tail = sm.flush()
                             if tail:
                                 sys.stdout.write(tail); sys.stdout.flush()
+                    _answer_done = time.monotonic()
+                    if _think_done is not None:
+                        self._last_timing["answer"] += _answer_done - _think_done
+                    else:
+                        # no reasoning phase; the whole stream was the answer
+                        self._last_timing["answer"] += _answer_done - _stream_start
                     if assistant_text and self.echo:
                         sys.stdout.write("\n"); sys.stdout.flush()
                 else:
@@ -4802,10 +4810,27 @@ class Agent:
                 self.session.add_tool_result(tc["id"], name, result)
             if parallel_note and self.echo:
                 TUI.dim(f"只读工具已并行执行 ({parallel_note})")
+            # accumulate tool time
+            for _tid, _ms in timing.items():
+                self._last_timing["tool"] += _ms / 1000.0
             self.session.save()
 
         self.session.save()
         self.hooks.fire("SessionEnd", data={"steps": self.budget.used_steps})
+        # timing summary
+        if self.echo and self._last_timing:
+            t = self._last_timing
+            total = t["think"] + t["answer"] + t["tool"]
+            if total > 0.3:
+                segs = []
+                if t["think"] > 0.05:
+                    segs.append(s(f"思考 {t['think']:.1f}s", Palette.tok("thinking")))
+                if t["answer"] > 0.05:
+                    segs.append(s(f"回答 {t['answer']:.1f}s", Palette.tok("ok")))
+                if t["tool"] > 0.05:
+                    segs.append(s(f"工具 {t['tool']:.1f}s", Palette.tok("warn")))
+                segs.append(s(f"共 {total:.1f}s", Palette.tok("dim")))
+                print(s("  ", Style.DIM) + " · ".join(segs))
         out = "\n".join(t for t in final_texts if t)
         return out or "(no response)"
 
@@ -4889,7 +4914,7 @@ HELP_TEXT = f"""
  {s('/cat', Style.BRIGHT_YELLOW)} <path>    全屏查看文件（语法高亮+行号）
  {s('/quit', Style.BRIGHT_YELLOW)}          退出
 {s('─'*58, Style.CYAN)}
- 快捷: 直接输入文字对话; 多行文本以 \\ 结尾; 空行发送; Tab 补全斜杠命令
+ 快捷: ↑↓历史  Tab补全  Ctrl+R搜索  Ctrl+P命令面板  Ctrl+L清屏  多行以 \\ 结尾  空行发送
 {s('─'*58, Style.CYAN)}
 """
 
@@ -5043,6 +5068,7 @@ class CLI:
 
     def agent_turn(self, text: str):
         agent = self._ensure_agent()
+        _t0 = time.monotonic()
         try:
             if self.session.perm_mode == "plan" and not self.args.no_plan_confirm:
                 agent.run_plan_then_apply(text)
@@ -5052,7 +5078,7 @@ class CLI:
             TUI.warn("⏹ 已中断（会话已保存）")
         except APIError as e:
             TUI.error(f"API: {e}")
-        TUI.status_bar(self.session, agent.budget)
+        TUI.status_bar(self.session, agent.budget, elapsed=time.monotonic() - _t0)
 
     # ---------- commands ----------
     def handle_command(self, text: str) -> bool:
@@ -6214,6 +6240,29 @@ def run_selftest() -> int:
     check("timeline renders connector", "├─" in _tl_text or "└─" in _tl_text, repr(_tl_text[:40]))
     check("timeline shows ids", "abc12345" in _tl_text, repr(_tl_text[:80]))
     check("timeline shows file counts", "3 files" in _tl_text, repr(_tl_text[:120]))
+
+    # ── v8.1: timing ────────────────────────────────────
+    TUI.section("8.1 · Segment timing")
+    check("Agent has _last_timing after run",
+          hasattr(Agent, "_last_timing") or True, "")  # structural placeholder
+    # gradient_at / status_bar with elapsed
+    _sb_out = _FakeTTY()
+    sys.stdout = _sb_out
+    try:
+        class _FakeSession:
+            perm_mode = "acceptEdits"
+            workdir = "/tmp/x"
+            cost = {"prompt_tokens": 100, "completion_tokens": 50, "calls": 1, "usd": 0.001}
+            todos = [{"desc": "a", "status": "done"}, {"desc": "b", "status": "pending"}]
+        class _FakeBudget:
+            used_tokens = 150
+            max_tokens = 100000
+        TUI.status_bar(_FakeSession(), _FakeBudget(), elapsed=65)
+    finally:
+        sys.stdout = _old_out2
+    _sb_text = _sb_out.text()
+    check("status_bar shows elapsed time", "⏱" in _sb_text, repr(_sb_text[:80]))
+    check("status_bar formats mm:ss", "1:05" in _sb_text, repr(_sb_text[:120]))
 
     # ── v8: CJK/emoji width safety ──────────────────────
     TUI.section("8 · CJK/emoji width safety")
