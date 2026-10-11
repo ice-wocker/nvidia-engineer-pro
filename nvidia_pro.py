@@ -736,26 +736,33 @@ def _md_inline(text: str) -> str:
                   lambda m: s(clip(m.group(), 60), Palette.tok("link")), text)
     return text
 
-def _md_code_block(code: str, lang: str, width: int) -> list:
-    """Render a fenced code block with a language label bar."""
+def _md_code_block(code: str, lang: str, width: int, line_numbers: bool = True) -> list:
+    """Render a fenced code block with a language label bar and optional line numbers."""
     norm = _norm_lang(lang)
     label = lang or "code"
     bar_w = max(width - 4, 20)
     bar = f"  ┌─ {label} " + "─" * max(0, bar_w - disp_width(label) - 4) + "┐"
     lines = [s(bar, Palette.tok("border"))]
+    code_lines = code.splitlines()
+    gutter_w = len(str(len(code_lines))) if line_numbers and code_lines else 0
     if len(code) > 8192:
         # too large: skip highlighting for performance
-        for ln in code.splitlines()[:80]:
-            lines.append("  │ " + ln[:max(0, width - 6)])
+        for i, ln in enumerate(code_lines[:80], 1):
+            prefix = f"{i:>{gutter_w}} │ " if line_numbers else "  │ "
+            lines.append(s(prefix, Palette.tok("dim")) + ln[:max(0, width - 6 - gutter_w)])
         lines.append(s("  │ " + f"… ({len(code)} chars, highlighting skipped)", Palette.tok("dim")))
     else:
         highlighted = hl(code, norm) if norm else code
-        for ln in highlighted.splitlines():
+        for i, ln in enumerate(highlighted.splitlines(), 1):
             # truncate at terminal width accounting for ANSI escapes
             visible = len(re.sub(r"\x1b\[[0-9;]*m", "", ln))
-            if visible > width - 6:
-                ln = ln[:width - 6] + "…"
-            lines.append("  │ " + ln)
+            if visible > width - 6 - gutter_w:
+                ln = ln[:width - 6 - gutter_w] + "…"
+            if line_numbers:
+                num = s(f"{i:>{gutter_w}}", Palette.tok("dim")) + s(" │ ", Palette.tok("border"))
+                lines.append("  " + num + ln)
+            else:
+                lines.append("  │ " + ln)
     lines.append(s("  └" + "─" * (bar_w + 2) + "┘", Palette.tok("border")))
     return lines
 
@@ -1113,6 +1120,43 @@ class TUI:
               s(f"  {args_clipped}", Palette.tok("dim")) +
               time_str + status_icon)
     @staticmethod
+    def tool_block(name, args_s, step, body, status=None, duration_ms=None, max_lines=8):
+        """Render a tool call as a bordered card: header bar + collapsible body."""
+        status_icon = ""
+        if status == "ok":
+            status_icon = s(" ✓", Palette.tok("ok"))
+        elif status == "err":
+            status_icon = s(" ✗", Palette.tok("err"))
+        time_str = ""
+        if duration_ms is not None:
+            if duration_ms >= 1000:
+                time_str = s(f" {duration_ms/1000:.1f}s", Palette.tok("dim"))
+            else:
+                time_str = s(f" {duration_ms:.0f}ms", Palette.tok("dim"))
+        term_w = max(40, shutil.get_terminal_size((80, 24)).columns)
+        header_w = max(term_w - 4, 30)
+        header_txt = f" {name}"
+        args_clipped = clip(mask_secrets(args_s), 40)
+        header = (f"┌─{header_txt} " + s(args_clipped, Palette.tok("dim"))
+                  + time_str + status_icon
+                  + " " + "─" * max(0, header_w - disp_width(header_txt) - disp_width(args_clipped) - 8) + "┐")
+        print(s(header, Palette.tok("border")))
+        body_lines = str(body).splitlines() if body else []
+        shown = body_lines[:max_lines]
+        for ln in shown:
+            if Style._disabled:
+                out_ln = ln[:term_w - 6]
+            else:
+                out_ln = hl(ln, "python")
+                visible = len(re.sub(r"\x1b\[[0-9;]*m", "", out_ln))
+                if visible > term_w - 6:
+                    out_ln = out_ln[:term_w - 6] + "…"
+            print(s("│ ", Palette.tok("border")) + out_ln)
+        if len(body_lines) > max_lines:
+            more = len(body_lines) - max_lines
+            print(s(f"│ {s('▸', Palette.tok('dim'))} +{more} more lines (用 /last 查看)", Palette.tok("border")))
+        print(s("└" + "─" * (header_w + 1) + "┘", Palette.tok("border")))
+    @staticmethod
     def tool_out(text, max_lines=6):
         """Render tool output with syntax-aware coloring and line limiting."""
         text = mask_secrets(str(text))
@@ -1144,7 +1188,7 @@ class TUI:
                     out_line = out_line[:200] + "…"
             print(s("   │ ", Palette.tok("dim")) + out_line)
         if len(lines) > max_lines:
-            print(s(f"   │ ⋮ (+{len(lines)-max_lines} more lines)", Palette.tok("dim")))
+            print(s(f"   ▸ +{len(lines)-max_lines} more lines", Palette.tok("dim")))
     @staticmethod
     def assistant(text):
         print(md(text))
@@ -1248,6 +1292,8 @@ class Spinner:
     Must never paint while the caller is streaming text to stdout — otherwise
     the frame lands mid-line and the answer is shredded.  Call pause() as soon
     as the first text delta arrives; resume()/stop() are safe from any thread.
+    All flag checks and writes happen under one lock so pause()/emit() can
+    never race a frame over freshly written output.
     """
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     def __init__(self, message="Working"):
@@ -1267,46 +1313,46 @@ class Spinner:
     def __exit__(self, *a):
         self.stop()
     def stop(self):
-        self._stop.set()
-        self._paused.clear()          # wake the thread so it can exit
+        with self._lock:
+            self._stop.set()
+            self._paused.clear()
+            if self._alive:
+                sys.stderr.write("\r" + " " * 72 + "\r")
+                sys.stderr.flush()
+                self._alive = False
         if self._thread:
             self._thread.join(timeout=0.3)
             self._thread = None
-        if self._alive:
-            self._clear_line()
-            self._alive = False
     def pause(self):
-        """Freeze the spinner and erase its line (thread-safe)."""
-        self._paused.set()
-        if self._alive:
-            self._clear_line()
+        """Freeze the spinner and erase its line (thread-safe, atomic)."""
+        with self._lock:
+            self._paused.set()
+            if self._alive:
+                sys.stderr.write("\r" + " " * 72 + "\r")
+                sys.stderr.flush()
     def emit(self, text: str):
         """Pause the spinner and write text atomically under the spinner lock.
 
         Prevents the spinner thread from racing a \r over freshly written
-        reasoning output (the thread may have passed its paused-check before
-        pause() ran, then overwrite the line when it takes the lock).
+        reasoning output.
         """
-        self._paused.set()
         with self._lock:
+            self._paused.set()
             if self._alive:
                 sys.stderr.write("\r" + " " * 72 + "\r")
             sys.stderr.write(text)
             sys.stderr.flush()
     def resume(self):
-        if self._alive:
-            self._paused.clear()
-    def _clear_line(self):
         with self._lock:
-            sys.stderr.write("\r" + " " * 72 + "\r")
-            sys.stderr.flush()
+            self._paused.clear()
     def _run(self):
         i = 0
         while not self._stop.is_set():
-            if self._paused.wait(timeout=0.08):
-                continue                       # paused: idle until resumed
-            f = self.FRAMES[i % len(self.FRAMES)]
+            time.sleep(0.08)
             with self._lock:
+                if self._paused.is_set() or self._stop.is_set():
+                    continue                       # paused/stopped: skip this frame
+                f = self.FRAMES[i % len(self.FRAMES)]
                 sys.stderr.write(f"\r  {s(f, Style.CYAN)} {self.message}…")
                 sys.stderr.flush()
             i += 1
@@ -4035,14 +4081,19 @@ class Agent:
                                 if not streaming_text and not getattr(self, "_no_think", False):
                                     txt = str(payload)
                                     if txt.strip():
-                                        prefix = "  " if not reasoning_shown else ""
-                                        sp.emit(s(f"{prefix}{txt}", Palette.tok("thinking"), Style.DIM, Style.ITALIC))
+                                        if not reasoning_shown and self.echo:
+                                            term_w = max(40, shutil.get_terminal_size((80, 24)).columns)
+                                            hdr = "┌─ 💭 思考 " + "─" * max(0, term_w - 14) + "┐"
+                                            sp.emit(s(hdr, Palette.tok("border")) + "\n")
+                                        sp.emit(s("│ ", Palette.tok("border"))
+                                                + s(txt, Palette.tok("thinking"), Style.DIM, Style.ITALIC) + "\n")
                                         reasoning_shown = True
                                 continue
                             if kind == "text":
                                 if not streaming_text:
                                     if reasoning_shown and self.echo:
-                                        sp.emit("\n")
+                                        term_w = max(40, shutil.get_terminal_size((80, 24)).columns)
+                                        sp.emit(s("└" + "─" * (term_w - 1) + "┘", Palette.tok("border")) + "\n")
                                     sp.pause()
                                     streaming_text = True
                                 assistant_text += payload
@@ -5420,6 +5471,10 @@ def run_selftest() -> int:
     md_task = md("- [x] done\n- [ ] todo\n", width=60)
     check("md task-list renders", "✓" in md_task or "☐" in md_task or "[x]" in md_task,
           repr(md_task[:40]))
+    # code block line numbers
+    md_code = md("```python\nline1 = 1\nline2 = 2\nline3 = 3\n```\n", width=60)
+    check("code block has line numbers", "1 │" in md_code or " 1 │" in md_code, repr(md_code[:80]))
+    check("code block has language header", "python" in md_code, repr(md_code[:60]))
 
     # ── v8: StreamMarkdown ──────────────────────────────
     TUI.section("8 · StreamMarkdown")
@@ -5440,6 +5495,18 @@ def run_selftest() -> int:
 
     # ── v8: CJK/emoji width safety ──────────────────────
     TUI.section("8 · CJK/emoji width safety")
+    # tool_block bordered card renders
+    _tb_out = _FakeTTY()
+    _old_out = sys.stdout
+    sys.stdout = _tb_out
+    try:
+        TUI.tool_block("read_file", '{"path":"x.py"}', 1, "line1\nline2\nline3", status="ok", duration_ms=12)
+    finally:
+        sys.stdout = _old_out
+    _tb_text = _tb_out.text()
+    check("tool_block renders border", "┌─" in _tb_text and "└" in _tb_text, repr(_tb_text[:40]))
+    check("tool_block shows tool name", "read_file" in _tb_text, repr(_tb_text[:60]))
+    check("tool_block shows body lines", "line1" in _tb_text, repr(_tb_text[:120]))
     check("disp_width CJK = 2", disp_width("中") == 2, repr(disp_width("中")))
     check("disp_width emoji = 2", disp_width("🚀") == 2, repr(disp_width("🚀")))
     check("pad_right respects CJK", disp_width(pad_right("中文", 10)) == 10,
