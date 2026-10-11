@@ -1153,6 +1153,19 @@ class Spinner:
         self._paused.set()
         if self._alive:
             self._clear_line()
+    def emit(self, text: str):
+        """Pause the spinner and write text atomically under the spinner lock.
+
+        Prevents the spinner thread from racing a \r over freshly written
+        reasoning output (the thread may have passed its paused-check before
+        pause() ran, then overwrite the line when it takes the lock).
+        """
+        self._paused.set()
+        with self._lock:
+            if self._alive:
+                sys.stderr.write("\r" + " " * 72 + "\r")
+            sys.stderr.write(text)
+            sys.stderr.flush()
     def resume(self):
         if self._alive:
             self._paused.clear()
@@ -3888,17 +3901,21 @@ class Agent:
                 if self.stream:
                     with Spinner("思考") as sp:
                         streaming_text = False
+                        reasoning_shown = False
                         sm = StreamMarkdown(echo=self.echo)
                         for kind, payload in self.client.chat(messages, tools=self.schemas, stream=True):
                             if kind == "reasoning":
                                 if not streaming_text and not getattr(self, "_no_think", False):
-                                    sp.pause()
-                                    if self.echo:
-                                        sys.stderr.write(s(f"  {payload}", Palette.tok("thinking"), Style.DIM, Style.ITALIC))
-                                        sys.stderr.flush()
+                                    txt = str(payload)
+                                    if txt.strip():
+                                        prefix = "  " if not reasoning_shown else ""
+                                        sp.emit(s(f"{prefix}{txt}", Palette.tok("thinking"), Style.DIM, Style.ITALIC))
+                                        reasoning_shown = True
                                 continue
                             if kind == "text":
                                 if not streaming_text:
+                                    if reasoning_shown and self.echo:
+                                        sp.emit("\n")
                                     sp.pause()
                                     streaming_text = True
                                 assistant_text += payload
@@ -4887,6 +4904,20 @@ def run_selftest() -> int:
     check("spinner clears its line on pause", _cleared)
     check("spinner stays quiet during streaming text", _quiet
           and not any(f in _fo.text() for f in Spinner.FRAMES))
+
+    # 4d. Spinner.emit writes atomically and survives spinner race
+    _fe2 = _FakeTTY()
+    sys.stderr = _fe2
+    try:
+        with Spinner("思考") as _sp2:
+            time.sleep(0.1)
+            _sp2.emit("  推理内容测试")
+            _after = _fe2.text()
+    finally:
+        sys.stderr = _re
+    check("spinner emit writes reasoning text", "推理内容测试" in _after, repr(_after[-30:]))
+    check("spinner emit clears line before write",
+          _after.endswith("推理内容测试"), repr(_after[-30:]))
 
     # 5. sandboxed workspace for tool tests
     #    The sandbox auto-approves so DANGEROUS paths are actually exercised;
