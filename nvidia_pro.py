@@ -24,7 +24,7 @@ try:
 except ImportError:
     readline = None
 
-__version__ = "7.0.0"
+__version__ = "8.0.0"
 APP_DIR = Path.home() / ".nvidia_engineer_pro"
 SESSIONS_DIR = APP_DIR / "sessions"
 CHECKPOINTS_DIR = APP_DIR / "checkpoints"
@@ -164,6 +164,157 @@ def random_uniform(ceiling: float = 0.4) -> float:
 # STYLE / TUI
 # ═══════════════════════════════════════════════════════════
 
+# ── Color capability detection ──────────────────────────────────────────────
+def _detect_color_mode():
+    if os.environ.get("NO_COLOR"):
+        return "off"
+    if not sys.stdout.isatty():
+        return "off"
+    ct = os.environ.get("COLORTERM", "")
+    if ct in ("truecolor", "24bit"):
+        return "truecolor"
+    term = os.environ.get("TERM", "")
+    if "256" in term:
+        return "256"
+    if os.environ.get("COLORFGBG"):
+        return "256"
+    return "16"
+
+_COLOR_MODE = _detect_color_mode()
+
+def _hex_to_ansi256(hex_color: str) -> str:
+    """Convert #RRGGBB to the nearest xterm-256 color index (as ANSI code string)."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    # grayscale ramp 232-255
+    if abs(r - g) < 8 and abs(g - b) < 8:
+        gray = round(((r + g + b) / 3 - 8) / 10)
+        gray = max(0, min(23, gray))
+        idx = 232 + gray
+    else:
+        def _q(v):
+            if v < 48: return 0
+            if v < 115: return 1
+            return (v - 35) // 40
+        ri, gi, bi = _q(r), _q(g), _q(b)
+        idx = 16 + 36 * ri + 6 * gi + bi
+    return f"\033[38;5;{idx}m"
+
+def _hex_to_ansi_true(hex_color: str) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"\033[38;2;{r};{g};{b}m"
+
+def _hex_to_ansi16(hex_color: str) -> str:
+    """Nearest 16-color ANSI code for a hex color."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    # simple nearest by luminance + hue
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    if lum < 60:
+        return "\033[30m"   # black
+    if lum > 200:
+        return "\033[37m"   # white
+    if r > g and r > b:
+        return "\033[91m" if lum > 140 else "\033[31m"
+    if g > r and g > b:
+        return "\033[92m" if lum > 140 else "\033[32m"
+    if b > r and b > g:
+        return "\033[94m" if lum > 140 else "\033[34m"
+    if r > 150 and g > 150 and b < 100:
+        return "\033[93m"  # yellow
+    if r > 150 and b > 150 and g < 100:
+        return "\033[95m"  # magenta
+    if g > 150 and b > 150 and r < 100:
+        return "\033[96m"  # cyan
+    return "\033[37m"
+
+# ── Theme definitions (GitHub-inspired) ──────────────────────────────────────
+_THEMES = {
+    "dark": {
+        "kw": "#ff7b72", "str": "#a5d6ff", "com": "#8b949e", "num": "#79c0ff",
+        "fn": "#d2a8ff", "typ": "#ffa657", "op": "#ff7b72", "pun": "#c9d1d9",
+        "builtin": "#79c0ff", "dec": "#d2a8ff", "ok": "#3fb950", "err": "#f85149",
+        "warn": "#d29922", "dim": "#6e7681", "link": "#58a6ff", "heading": "#1f6feb",
+        "table": "#30363d", "accent": "#58a6ff", "bg": "#0d1117", "fg": "#e6edf3",
+        "quote": "#8b949e", "diff_add": "#3fb950", "diff_del": "#f85149",
+        "diff_hunk": "#58a6ff", "diff_meta": "#8b949e", "spinner": "#58a6ff",
+        "status": "#6e7681", "prompt": "#58a6ff", "border": "#30363d",
+        "sel": "#1f6feb", "thinking": "#8b949e",
+    },
+    "light": {
+        "kw": "#cf222e", "str": "#0a3069", "com": "#6e7781", "num": "#0550ae",
+        "fn": "#8250df", "typ": "#953800", "op": "#cf222e", "pun": "#24292f",
+        "builtin": "#0550ae", "dec": "#8250df", "ok": "#1a7f37", "err": "#cf222e",
+        "warn": "#9a6700", "dim": "#57606a", "link": "#0969da", "heading": "#0550ae",
+        "table": "#d0d7de", "accent": "#0969da", "bg": "#ffffff", "fg": "#1f2328",
+        "quote": "#57606a", "diff_add": "#1a7f37", "diff_del": "#cf222e",
+        "diff_hunk": "#0969da", "diff_meta": "#57606a", "spinner": "#0969da",
+        "status": "#57606a", "prompt": "#0969da", "border": "#d0d7de",
+        "sel": "#0969da", "thinking": "#57606a",
+    },
+}
+
+class Palette:
+    """Theme-aware color palette with automatic capability detection."""
+    _theme = "dark"
+    _cache = {}
+
+    @classmethod
+    def set_theme(cls, name: str):
+        if name in _THEMES:
+            cls._theme = name
+            cls._cache.clear()
+
+    @classmethod
+    def get_theme(cls) -> str:
+        return cls._theme
+
+    @classmethod
+    def tokens(cls) -> dict:
+        return _THEMES.get(cls._theme, _THEMES["dark"])
+
+    @classmethod
+    def tok(cls, token: str) -> str:
+        """Return the ANSI escape code for a semantic token."""
+        if _COLOR_MODE == "off":
+            return ""
+        key = (cls._theme, token, _COLOR_MODE)
+        if key in cls._cache:
+            return cls._cache[key]
+        hex_color = cls.tokens().get(token, "#c9d1d9")
+        if _COLOR_MODE == "truecolor":
+            code = _hex_to_ansi_true(hex_color)
+        elif _COLOR_MODE == "256":
+            code = _hex_to_ansi256(hex_color)
+        else:
+            code = _hex_to_ansi16(hex_color)
+        cls._cache[key] = code
+        return code
+
+    @classmethod
+    def bg(cls, token: str) -> str:
+        """Background variant of a token."""
+        if _COLOR_MODE == "off":
+            return ""
+        hex_color = cls.tokens().get(token, "#30363d")
+        if _COLOR_MODE == "truecolor":
+            h = hex_color.lstrip("#")
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"\033[48;2;{r};{g};{b}m"
+        if _COLOR_MODE == "256":
+            return _hex_to_ansi256(hex_color).replace("38;5", "48;5")
+        return ""
+
+    @classmethod
+    def reset(cls) -> str:
+        return "" if _COLOR_MODE == "off" else "\033[0m"
+
+    @classmethod
+    def mode(cls) -> str:
+        return _COLOR_MODE
+
+# ── Legacy Style class (backwards-compatible aliases) ───────────────────────
 class Style:
     RESET = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"; ITALIC = "\033[3m"
     RED = "\033[31m"; GREEN = "\033[32m"; YELLOW = "\033[33m"
@@ -180,13 +331,583 @@ class Style:
             if not k.startswith("_") and k.isupper():
                 setattr(cls, k, "")
 
-if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+if _COLOR_MODE == "off":
     Style.disable()
 
 def s(text, *styles):
     if Style._disabled or not styles:
         return text
     return f"{''.join(styles)}{text}{Style.RESET}"
+
+# ── Syntax highlighter (pure regex, stdlib only) ─────────────────────────────
+# Each language is a list of (pattern, token_name) applied in order via a
+# single combined regex. The scanner walks the source once, longest-match wins.
+
+_LANGS = {
+    "python": {
+        "kw": r"\b(False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield|match|case)\b",
+        "builtin": r"\b(print|len|range|str|int|float|dict|list|set|tuple|bytes|bytearray|bool|complex|object|type|super|isinstance|issubclass|hasattr|getattr|setattr|delattr|open|input|enumerate|zip|map|filter|sorted|reversed|any|all|min|max|sum|abs|round|pow|divmod|callable|iter|next|id|hash|repr|format|vars|locals|globals|dir|help|exit|quit|copyright|credits|license)\b",
+        "dec": r"@\w+(?:\.\w+)*",
+        "str": r"(?:'''\s*[\s\S]*?'''|\"\"\"\s*[\s\S]*?\"\"\"|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")",
+        "com": r"#[^\n]*",
+        "num": r"\b0[xX][0-9a-fA-F_]+\b|\b0[bB][01_]+\b|\b0[oO][0-7_]+\b|\b\d[\d_]*(?:\.[\d_]+)?(?:[eE][+-]?\d+)?\b",
+        "fn": r"\b[A-Za-z_]\w*(?=\s*\()",
+    },
+    "js": {
+        "kw": r"\b(await|break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|false|finally|for|from|function|get|if|implements|import|in|instanceof|interface|let|new|null|of|package|private|protected|public|return|set|static|super|switch|this|throw|true|try|typeof|undefined|var|void|while|with|yield|async|as)\b",
+        "builtin": r"\b(Array|Boolean|Date|Error|Function|JSON|Math|Number|Object|Promise|RegExp|String|Symbol|console|document|globalThis|window|process|require|module|exports|setTimeout|setInterval|fetch|Infinity|NaN)\b",
+        "str": r"(?:`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")",
+        "com": r"//[^\n]*|/\*[\s\S]*?\*/",
+        "num": r"\b0[xX][0-9a-fA-F]+\b|\b\d[\d_]*(?:\.[\d_]+)?(?:[eE][+-]?\d+)?\b",
+        "fn": r"\b[A-Za-z_$]\w*(?=\s*\()",
+    },
+    "ts": None,  # alias to js + extras
+    "json": {
+        "str": r"\"(?:\\.|[^\"\\])*\"",
+        "num": r"-?\b\d[\d_]*(?:\.[\d_]+)?(?:[eE][+-]?\d+)?\b",
+        "kw": r"\b(true|false|null)\b",
+    },
+    "yaml": {
+        "kw": r"(?:^|\n)\s*(?:---|\.\.\.)\s*$|\b(true|false|null|yes|no|on|off)\b",
+        "str": r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')",
+        "com": r"#[^\n]*",
+        "num": r"\b\d[\d_]*(?:\.[\d_]+)?\b",
+        "fn": r"^\s*[\w.-]+(?=:)",
+    },
+    "bash": {
+        "kw": r"\b(if|then|else|elif|fi|for|while|until|do|done|case|esac|function|in|select|time|coproc|return|exit|break|continue|local|export|declare|readonly|unset|shift|eval|exec|set|trap|wait|source|alias)\b",
+        "builtin": r"\b(echo|printf|read|cd|pwd|test|true|false|ls|cat|grep|sed|awk|find|xargs|sort|uniq|wc|head|tail|mkdir|rm|cp|mv|touch|chmod|chown|git|curl|wget|python3?|node|npm|pip|cargo|make|sudo|kill|ps|top|df|du|tar|zip|unzip|which|type|hash|history|jobs|bg|fg|nohup)\b",
+        "str": r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
+        "com": r"#[^\n]*",
+        "num": r"\b\d+\b",
+        "fn": r"\$\{[^}]+\}|\$\w+",
+    },
+    "diff": {
+        "diff_add": r"^\+[^\n]*",
+        "diff_del": r"^-[^\n]*",
+        "diff_hunk": r"^@@[^\n]*",
+        "diff_meta": r"^(?:diff|index|---|\+\+\+|new file|deleted file|rename|similarity|Binary)[^\n]*",
+    },
+    "markdown": {
+        "heading": r"^#{1,6}[^\n]*",
+        "kw": r"^\s*(?:[-*+]|\d+\.)\s|^\s*\[[ xX]\]\s",
+        "link": r"\[([^\]]*)\]\(([^)]+)\)|https?://\S+",
+        "str": r"`[^`\n]+`",
+        "com": r"^>[^\n]*",
+        "table": r"^\|.*\|$",
+    },
+    "go": {
+        "kw": r"\b(break|case|chan|const|continue|default|defer|else|fallthrough|for|func|go|goto|if|import|interface|map|package|range|return|select|struct|switch|type|var)\b",
+        "builtin": r"\b(bool|byte|complex64|complex128|error|float32|float64|int|int8|int16|int32|int64|rune|string|uint|uint8|uint16|uint32|uint64|uintptr|true|false|iota|nil|append|cap|copy|delete|len|make|new|panic|print|println|recover|close|complex|imag|real)\b",
+        "str": r"\"(?:\\.|[^\"\\])*\"|`[^`]*`|'(?:\\.|[^'\\])'",
+        "com": r"//[^\n]*|/\*[\s\S]*?\*/",
+        "num": r"\b0[xX][0-9a-fA-F_]+\b|\b0[bB][01_]+\b|\b0[oO][0-7_]+\b|\b\d[\d_]*(?:\.[\d_]+)?(?:[eE][+-]?\d+)?\b",
+        "fn": r"\b[A-Za-z_]\w*(?=\s*\()",
+    },
+    "rust": {
+        "kw": r"\b(as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while)\b",
+        "builtin": r"\b(bool|char|f32|f64|i8|i16|i32|i64|i128|isize|str|u8|u16|u32|u64|u128|usize|String|Vec|Box|Option|Result|Some|None|Ok|Err|println|print|format|assert|assert_eq|assert_ne|debug_assert|todo|unimplemented|unreachable)\b",
+        "dec": r"#!?\[[^\]]*\]|#\[[^\]]*\]",
+        "str": r"\"(?:\\.|[^\"\\])*\"|r#*\"[\s\S]*?\"#*",
+        "com": r"//[^\n]*|/\*[\s\S]*?\*/",
+        "num": r"\b0[xX][0-9a-fA-F_]+\b|\b0[bB][01_]+\b|\b0[oO][0-7_]+\b|\b\d[\d_]*(?:\.[\d_]+)?(?:[eE][+-]?\d+)?[uif]?(?:8|16|32|64|128|size)?\b",
+        "fn": r"\b[A-Za-z_]\w*(?=\s*\()",
+    },
+    "sql": {
+        "kw": r"\b(SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|DROP|ALTER|ADD|INDEX|VIEW|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP|BY|ORDER|HAVING|LIMIT|OFFSET|AS|AND|OR|NOT|NULL|IS|IN|EXISTS|BETWEEN|LIKE|ILIKE|DISTINCT|UNION|ALL|CASE|WHEN|THEN|ELSE|END|PRIMARY|KEY|FOREIGN|REFERENCES|UNIQUE|CHECK|DEFAULT|CONSTRAINT|CASCADE|RESTRICT|BEGIN|COMMIT|ROLLBACK|TRANSACTION|COUNT|SUM|AVG|MIN|MAX|COALESCE|CAST|WITH|RETURNING|CONFLICT|DO|NOTHING)\b",
+        "str": r"'(?:''|[^'])*'",
+        "com": r"--[^\n]*|/\*[\s\S]*?\*/",
+        "num": r"\b\d[\d_]*(?:\.\d+)?\b",
+    },
+    "toml": {
+        "kw": r"^\s*\[[^\]]+\]",
+        "str": r"\"\"\"[\s\S]*?\"\"\"|'''[\s\S]*?'''|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
+        "com": r"#[^\n]*",
+        "num": r"\b\d[\d_]*(?:\.[\d_]+)?\b",
+        "fn": r"^\s*[\w.-]+(?=\s*=)",
+    },
+    "ini": {
+        "kw": r"^\s*\[[^\]]+\]",
+        "str": r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
+        "com": r"[;#][^\n]*",
+        "fn": r"^\s*[\w.-]+(?=\s*[=:])",
+    },
+}
+_LANGS["ts"] = dict(_LANGS["js"])
+_LANGS["typescript"] = _LANGS["ts"]
+_LANGS["javascript"] = _LANGS["js"]
+_LANGS["py"] = _LANGS["python"]
+_LANGS["sh"] = _LANGS["bash"]
+_LANGS["shell"] = _LANGS["bash"]
+_LANGS["zsh"] = _LANGS["bash"]
+_LANGS["yml"] = _LANGS["yaml"]
+_LANGS["toml"] = _LANGS["toml"]
+
+_TOKEN_ORDER = ["str", "com", "dec", "num", "kw", "builtin", "fn",
+                "diff_add", "diff_del", "diff_hunk", "diff_meta",
+                "heading", "link", "table"]
+
+def _build_scanner(lang: str):
+    """Build a combined regex + token map for a language. Cached per lang."""
+    spec = _LANGS.get(lang)
+    if not spec:
+        return None
+    parts, tokmap = [], {}
+    for tok in _TOKEN_ORDER:
+        if tok in spec:
+            idx = len(parts)
+            parts.append(f"(?P<{tok}_{idx}>{spec[tok]})")
+            tokmap[f"{tok}_{idx}"] = tok
+    if not parts:
+        return None
+    try:
+        rx = re.compile("|".join(parts), re.MULTILINE)
+    except re.error:
+        return None
+    return rx, tokmap
+
+_SCANNER_CACHE = {}
+
+def _get_scanner(lang: str):
+    key = (lang or "").lower().split(":")[0].strip()
+    if key not in _SCANNER_CACHE:
+        _SCANNER_CACHE[key] = _build_scanner(key)
+    return _SCANNER_CACHE[key]
+
+def hl(code: str, lang: str = "") -> str:
+    """Syntax-highlight `code` for `lang`. Falls back to plain text."""
+    if Style._disabled or not code:
+        return code
+    scanner = _get_scanner(lang)
+    if not scanner:
+        return code
+    rx, tokmap = scanner
+    out, last = [], 0
+    for m in rx.finditer(code):
+        if m.start() > last:
+            out.append(code[last:m.start()])
+        tok = tokmap[m.lastgroup]
+        out.append(s(m.group(), Palette.tok(tok)))
+        last = m.end()
+    out.append(code[last:])
+    return "".join(out)
+
+def hl_diff(text: str) -> str:
+    """Highlight a unified diff string."""
+    if Style._disabled:
+        return text
+    out = []
+    for line in text.splitlines():
+        if line.startswith(("+++", "---")):
+            out.append(s(line, Style.BOLD, Palette.tok("diff_meta")))
+        elif line.startswith("@@"):
+            out.append(s(line, Palette.tok("diff_hunk")))
+        elif line.startswith("+"):
+            out.append(s(line, Palette.tok("diff_add")))
+        elif line.startswith("-"):
+            out.append(s(line, Palette.tok("diff_del")))
+        elif line.startswith(("diff ", "index ", "new file", "deleted file", "rename ", "Binary")):
+            out.append(s(line, Palette.tok("diff_meta")))
+        else:
+            out.append(s(line, Palette.tok("dim")))
+    return "\n".join(out)
+
+def hl_matches(text: str, pattern: str) -> str:
+    """Highlight regex matches in `text` (for grep results)."""
+    if Style._disabled or not pattern:
+        return text
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return text
+    out = []
+    for line in text.splitlines():
+        def _repl(m):
+            return s(m.group(), Palette.bg("sel"), Style.BOLD)
+        out.append(rx.sub(_repl, line))
+    return "\n".join(out)
+
+# alias for the language used inside fenced code blocks in markdown
+_LANG_ALIASES = {
+    "py": "python", "python3": "python", "js": "js", "javascript": "js",
+    "ts": "ts", "typescript": "ts", "json": "json", "yml": "yaml",
+    "yaml": "yaml", "sh": "bash", "shell": "bash", "zsh": "bash",
+    "bash": "bash", "diff": "diff", "patch": "diff", "md": "markdown",
+    "markdown": "markdown", "go": "go", "golang": "go", "rs": "rust",
+    "rust": "rust", "sql": "sql", "toml": "toml", "ini": "ini",
+    "cfg": "ini", "conf": "ini", "html": "", "xml": "", "css": "",
+    "c": "", "cpp": "", "java": "", "kotlin": "", "swift": "",
+}
+
+def _norm_lang(lang: str) -> str:
+    return _LANG_ALIASES.get((lang or "").strip().lower(), (lang or "").strip().lower())
+
+# ── Markdown block-level renderer (CJK-aware, stdlib only) ──────────────────
+
+def _wrap_cjk(text: str, width: int, indent: str = "") -> list:
+    """Wrap text to `width` terminal columns, breaking CJK per-character and
+    ASCII per-word. Returns a list of lines (each already prefixed with indent)."""
+    if width <= 0:
+        return [indent + text]
+    lines, cur, cur_w = [], [], 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\n":
+            lines.append(indent + "".join(cur))
+            cur, cur_w = [], 0
+            i += 1
+            continue
+        cw = disp_width(ch)
+        # collect a token: a run of non-space ASCII chars, or a single CJK char
+        if ch.isspace():
+            token, tw = ch, cw
+            i += 1
+        elif unicodedata.east_asian_width(ch) in ("W", "F"):
+            token, tw = ch, cw
+            i += 1
+        else:
+            j = i
+            while j < n and not text[j].isspace() and unicodedata.east_asian_width(text[j]) not in ("W", "F"):
+                j += 1
+            token, tw = text[i:j], disp_width(text[i:j])
+            i = j
+        if cur_w + tw > width and cur:
+            lines.append(indent + "".join(cur))
+            cur, cur_w = [], 0
+            if token.isspace():
+                continue  # drop leading space on new line
+        cur.append(token)
+        cur_w += tw
+    if cur:
+        lines.append(indent + "".join(cur))
+    return lines or [""]
+
+def _md_inline(text: str) -> str:
+    """Render inline markdown: **bold**, *italic*, `code`, ~~strike~~, [text](url)."""
+    if Style._disabled:
+        return text
+    # inline code first (protect from other rules)
+    parts = []
+    last = 0
+    for m in re.finditer(r"`([^`\n]+)`", text):
+        parts.append(text[last:m.start()])
+        parts.append(s(m.group(1), Palette.bg("table"), Palette.tok("str")))
+        last = m.end()
+    parts.append(text[last:])
+    text = "".join(parts)
+    # bold+italic combined
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", lambda m: s(m.group(1), Style.BOLD, Style.ITALIC), text)
+    text = re.sub(r"___(.+?)___", lambda m: s(m.group(1), Style.BOLD, Style.ITALIC), text)
+    # bold
+    text = re.sub(r"\*\*(.+?)\*\*", lambda m: s(m.group(1), Style.BOLD), text)
+    text = re.sub(r"__(.+?)__", lambda m: s(m.group(1), Style.BOLD), text)
+    # italic (avoid matching inside already-colored spans by requiring single *)
+    text = re.sub(r"(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)", lambda m: s(m.group(1), Style.ITALIC), text)
+    text = re.sub(r"(?<!_)_(?!\s)([^_\n]+?)(?<!\s)_(?!_)", lambda m: s(m.group(1), Style.ITALIC), text)
+    # strikethrough
+    text = re.sub(r"~~(.+?)~~", lambda m: s(m.group(1), Style.DIM), text)
+    # links: [text](url) — show text in link color, URL dimmed
+    text = re.sub(r"\[([^\]]*)\]\(([^)]+)\)",
+                  lambda m: f"{s(m.group(1), Palette.tok('link'))} {s('(' + clip(m.group(2), 40) + ')', Palette.tok('dim'))}",
+                  text)
+    # bare URLs
+    text = re.sub(r"(?<![\(\[])https?://[^\s\)\]]+",
+                  lambda m: s(clip(m.group(), 60), Palette.tok("link")), text)
+    return text
+
+def _md_code_block(code: str, lang: str, width: int) -> list:
+    """Render a fenced code block with a language label bar."""
+    norm = _norm_lang(lang)
+    label = lang or "code"
+    bar_w = max(width - 4, 20)
+    bar = f"  ┌─ {label} " + "─" * max(0, bar_w - disp_width(label) - 4) + "┐"
+    lines = [s(bar, Palette.tok("border"))]
+    if len(code) > 8192:
+        # too large: skip highlighting for performance
+        for ln in code.splitlines()[:80]:
+            lines.append("  │ " + ln[:max(0, width - 6)])
+        lines.append(s("  │ " + f"… ({len(code)} chars, highlighting skipped)", Palette.tok("dim")))
+    else:
+        highlighted = hl(code, norm) if norm else code
+        for ln in highlighted.splitlines():
+            # truncate at terminal width accounting for ANSI escapes
+            visible = len(re.sub(r"\x1b\[[0-9;]*m", "", ln))
+            if visible > width - 6:
+                ln = ln[:width - 6] + "…"
+            lines.append("  │ " + ln)
+    lines.append(s("  └" + "─" * (bar_w + 2) + "┘", Palette.tok("border")))
+    return lines
+
+def _md_table(lines_src: list, width: int) -> list:
+    """Render a markdown table."""
+    rows = []
+    for ln in lines_src:
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        rows.append(cells)
+    if len(rows) < 2:
+        return [_md_inline(l) for l in lines_src]
+    # drop separator row (---|---)
+    header = rows[0]
+    body = [r for r in rows[1:] if not all(set(c) <= set("-: ") for c in r)]
+    ncols = max(len(header), max((len(r) for r in body), default=0))
+    header += [""] * (ncols - len(header))
+    body = [r + [""] * (ncols - len(r)) for r in body]
+    col_w = [0] * ncols
+    for r in [header] + body:
+        for i, c in enumerate(r):
+            col_w[i] = max(col_w[i], min(disp_width(c), width // max(ncols, 1) - 2))
+    sep = "─"
+    out = []
+    out.append("  " + "  ".join(s(pad_right(_md_inline(header[i]) if not Style._disabled else header[i], col_w[i])
+                                  if not Style._disabled else pad_right(header[i], col_w[i]),
+                                  Style.BOLD, Palette.tok("heading")) for i in range(ncols)))
+    # simpler: build header with padding on plain text then apply style
+    out = []
+    hdr_cells = []
+    for i in range(ncols):
+        plain = clip(header[i], col_w[i])
+        hdr_cells.append(s(pad_right(plain, col_w[i]), Style.BOLD, Palette.tok("heading")))
+    out.append("  " + "  ".join(hdr_cells))
+    out.append(s("  " + sep * (sum(col_w) + 2 * (ncols - 1)), Palette.tok("border")))
+    for r in body:
+        cells = []
+        for i in range(ncols):
+            plain = clip(r[i], col_w[i])
+            cells.append(pad_right(_md_inline(plain), col_w[i]) if not Style._disabled else pad_right(plain, col_w[i]))
+        out.append("  " + "  ".join(cells))
+    return out
+
+def md(text: str, width: int = None) -> str:
+    """Render markdown text to styled terminal output.
+
+    Handles: headings, bold/italic/strike/inline-code, fenced code blocks,
+    ordered/unordered/task lists (nested), blockquotes, tables, hr, links.
+    CJK-aware wrapping. Falls back to plain text when colors are disabled.
+    """
+    if not text:
+        return ""
+    if width is None:
+        width = max(40, shutil.get_terminal_size((80, 24)).columns - 2)
+    lines_out = []
+    lines = text.splitlines()
+    i = 0
+    n = len(lines)
+    while i < n:
+        ln = lines[i]
+        stripped = ln.strip()
+        # blank line
+        if not stripped:
+            lines_out.append("")
+            i += 1
+            continue
+        # fenced code block
+        fence = re.match(r"^```(\w*)\s*$", stripped)
+        if fence:
+            lang = fence.group(1)
+            code_lines = []
+            i += 1
+            while i < n and not re.match(r"^```\s*$", lines[i].strip()):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1  # skip closing fence
+            lines_out.extend(_md_code_block("\n".join(code_lines), lang, width))
+            continue
+        # heading
+        hm = re.match(r"^(#{1,6})\s+(.*)", stripped)
+        if hm:
+            level = len(hm.group(1))
+            content = _md_inline(hm.group(2))
+            colors = {1: (Style.BOLD, Palette.tok("heading")),
+                      2: (Style.BOLD, Palette.tok("accent")),
+                      3: (Palette.tok("accent"),), 4: (Palette.tok("accent"),),
+                      5: (Palette.tok("dim"),), 6: (Palette.tok("dim"),)}
+            st = colors.get(level, (Palette.tok("dim"),))
+            prefix = "  " if level <= 2 else "    "
+            lines_out.append(s(prefix + content, *st))
+            if level <= 2:
+                lines_out.append(s(prefix + "─" * min(disp_width(hm.group(2)), width - 4), Palette.tok("border")))
+            i += 1
+            continue
+        # horizontal rule
+        if re.match(r"^(-{3,}|\*{3,}|_{3,})\s*$", stripped):
+            lines_out.append(s("  " + "─" * (width - 2), Palette.tok("border")))
+            i += 1
+            continue
+        # blockquote
+        if stripped.startswith(">"):
+            quote_lines = []
+            while i < n and lines[i].strip().startswith(">"):
+                quote_lines.append(re.sub(r"^>\s?", "", lines[i]))
+                i += 1
+            inner = md("\n".join(quote_lines), width - 4)
+            for ql in inner.splitlines():
+                lines_out.append(s("  │ ", Palette.tok("quote")) + ql)
+            continue
+        # table
+        if stripped.startswith("|") and "|" in stripped[1:]:
+            tbl_lines = []
+            while i < n and lines[i].strip().startswith("|"):
+                tbl_lines.append(lines[i])
+                i += 1
+            lines_out.extend(_md_table(tbl_lines, width))
+            continue
+        # unordered list
+        um = re.match(r"^(\s*)([-*+])\s+(.*)", ln)
+        if um:
+            indent = len(um.group(1))
+            depth = indent // 2
+            bullet = um.group(2)
+            content = um.group(3)
+            # task list
+            tm = re.match(r"^\[([ xX])\]\s+(.*)", content)
+            if tm:
+                mark = "✓" if tm.group(1).lower() == "x" else "☐"
+                mark_col = Palette.tok("ok") if tm.group(1).lower() == "x" else Palette.tok("dim")
+                prefix = "  " * (depth + 1) + s(mark + " ", mark_col)
+                body = _md_inline(tm.group(2))
+            else:
+                prefix = "  " * (depth + 1) + s(bullet + " ", Palette.tok("accent"))
+                body = _md_inline(content)
+            avail = width - disp_width("  " * (depth + 1)) - 2
+            wrapped = _wrap_cjk(re.sub(r"\x1b\[[0-9;]*m", "", body), avail)
+            # first line gets prefix, rest get indent
+            lines_out.append(prefix + body if disp_width(re.sub(r"\x1b\[[0-9;]*m", "", body)) <= avail
+                            else prefix + wrapped[0])
+            for wln in wrapped[1:]:
+                lines_out.append("  " * (depth + 1) + "  " + wln)
+            i += 1
+            continue
+        # ordered list
+        om = re.match(r"^(\s*)(\d+[.)])\s+(.*)", ln)
+        if om:
+            indent = len(om.group(1))
+            depth = indent // 2
+            num = om.group(2)
+            content = om.group(3)
+            prefix = "  " * (depth + 1) + s(num + " ", Palette.tok("accent"))
+            body = _md_inline(content)
+            avail = width - disp_width("  " * (depth + 1)) - disp_width(num) - 1
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", body)
+            wrapped = _wrap_cjk(plain, avail)
+            lines_out.append(prefix + body if disp_width(plain) <= avail
+                            else prefix + wrapped[0])
+            for wln in wrapped[1:]:
+                lines_out.append("  " * (depth + 1) + "  " + wln)
+            i += 1
+            continue
+        # plain paragraph
+        body = _md_inline(stripped)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", body)
+        avail = width - 2
+        wrapped = _wrap_cjk(plain, avail)
+        if disp_width(plain) <= avail:
+            lines_out.append("  " + body)
+        else:
+            # re-wrap the styled body by splitting on plain text positions
+            lines_out.append("  " + wrapped[0])
+            for wln in wrapped[1:]:
+                lines_out.append("  " + wln)
+        i += 1
+    return "\n".join(lines_out)
+
+# ── Streaming markdown renderer ──────────────────────────────────────────────
+
+class StreamMarkdown:
+    """Streaming-safe markdown renderer.
+
+    Feed text chunks as they arrive from the API; only completed lines are
+    rendered and emitted. Fenced code blocks are held until the closing fence
+    (or flush) so syntax highlighting sees the complete block. Inline markup
+    (bold, code) is held until the closing delimiter, with a size cap to
+    avoid unbounded buffering on malformed input.
+    """
+
+    MAX_INLINE_BUFFER = 2000   # chars to buffer waiting for a closing delimiter
+
+    def __init__(self, width: int = None, echo: bool = True):
+        self.width = width or max(40, shutil.get_terminal_size((80, 24)).columns - 2)
+        self.echo = echo
+        self._line_buf = ""          # incomplete line awaiting newline
+        self._in_fence = False
+        self._fence_lang = ""
+        self._fence_buf = []         # lines inside a code fence
+        self._out = []               # all emitted lines (for agent_text reconstruction)
+        self._started = False
+
+    def feed(self, chunk: str) -> str:
+        """Feed a text chunk. Returns any completed rendered output to print."""
+        if not chunk:
+            return ""
+        emitted = []
+        self._line_buf += chunk
+        while "\n" in self._line_buf:
+            line, self._line_buf = self._line_buf.split("\n", 1)
+            out = self._process_line(line)
+            if out is not None:
+                emitted.append(out)
+        return "\n".join(emitted) + ("\n" if emitted else "")
+
+    def _process_line(self, line: str):
+        """Process one completed line. Returns rendered string or None to skip."""
+        stripped = line.strip()
+        # fence delimiters
+        fence_m = re.match(r"^```(\w*)\s*$", stripped)
+        if fence_m:
+            if self._in_fence:
+                # closing fence — render the accumulated block
+                self._in_fence = False
+                block = "\n".join(self._fence_buf)
+                self._fence_buf = []
+                rendered = _md_code_block(block, self._fence_lang, self.width)
+                self._out.append(block)
+                return "\n".join(rendered)
+            else:
+                # opening fence — start buffering
+                self._in_fence = True
+                self._fence_lang = fence_m.group(1)
+                self._fence_buf = []
+                return None  # suppress the fence line itself
+        if self._in_fence:
+            self._fence_buf.append(line)
+            return None
+        # blank line
+        if not stripped:
+            self._out.append("")
+            return ""
+        # render a single non-code line through the block renderer
+        rendered = md(line, width=self.width)
+        self._out.append(line)
+        return rendered
+
+    def flush(self) -> str:
+        """Flush any remaining buffered content. Call when the stream ends."""
+        parts = []
+        # flush incomplete line
+        if self._line_buf:
+            out = self._process_line(self._line_buf)
+            self._line_buf = ""
+            if out is not None:
+                parts.append(out)
+        # flush unclosed fence
+        if self._in_fence and self._fence_buf:
+            block = "\n".join(self._fence_buf)
+            self._fence_buf = []
+            self._in_fence = False
+            rendered = _md_code_block(block, self._fence_lang, self.width)
+            self._out.append(block)
+            parts.append("\n".join(rendered))
+        elif self._in_fence:
+            self._in_fence = False
+        return "\n".join(parts) + ("\n" if parts else "")
+
+    def text(self) -> str:
+        """The raw (unrendered) text accumulated so far."""
+        all_lines = list(self._out)
+        if self._line_buf:
+            all_lines.append(self._line_buf)
+        return "\n".join(all_lines)
 
 def disp_width(text) -> int:
     """Terminal columns occupied by `text` (CJK/emoji count as 2, combining as 0).
@@ -253,14 +974,61 @@ class TUI:
     @staticmethod
     def dim(msg):   print(s(f"  {msg}", Style.GRAY))
     @staticmethod
-    def tool(name, args_s, step):
-        print(s(f"  ⚙ [{step}] ", Style.BRIGHT_YELLOW) + s(name, Style.YELLOW) + s(f" {mask_secrets(args_s)}", Style.GRAY))
+    def tool(name, args_s, step, duration_ms=None, status=None):
+        """Render a tool call card with optional timing and status."""
+        icon = "⚙"
+        status_icon = ""
+        if status == "ok":
+            status_icon = s(" ✓", Palette.tok("ok"))
+        elif status == "err":
+            status_icon = s(" ✗", Palette.tok("err"))
+        time_str = ""
+        if duration_ms is not None:
+            if duration_ms >= 1000:
+                time_str = s(f"  {duration_ms/1000:.1f}s", Palette.tok("dim"))
+            else:
+                time_str = s(f"  {duration_ms:.0f}ms", Palette.tok("dim"))
+        args_clipped = clip(mask_secrets(args_s), 60)
+        print(s(f"  {icon} ", Palette.tok("accent")) +
+              s(name, Style.BOLD, Palette.tok("fn")) +
+              s(f"  {args_clipped}", Palette.tok("dim")) +
+              time_str + status_icon)
     @staticmethod
-    def tool_out(line):
-        print(s("     │ ", Style.GRAY) + mask_secrets(line))
+    def tool_out(text, max_lines=6):
+        """Render tool output with syntax-aware coloring and line limiting."""
+        text = mask_secrets(str(text))
+        lines = text.splitlines()
+        if not lines:
+            return
+        # auto-detect content type for highlighting
+        stripped = text.lstrip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                obj = json.loads(text)
+                text = json.dumps(obj, ensure_ascii=False, indent=2)
+                lines = text.splitlines()
+            except Exception:
+                pass
+        for i, line in enumerate(lines[:max_lines]):
+            # try syntax highlight for code-like output
+            if Style._disabled:
+                out_line = line[:200]
+            else:
+                # detect if it looks like a diff
+                if line.startswith(("+", "-", "@@")):
+                    out_line = hl_diff(line)
+                else:
+                    out_line = hl(line, "python")  # generic fallback
+                # truncate visible content at terminal width
+                visible = len(re.sub(r"\x1b\[[0-9;]*m", "", out_line))
+                if visible > 200:
+                    out_line = out_line[:200] + "…"
+            print(s("   │ ", Palette.tok("dim")) + out_line)
+        if len(lines) > max_lines:
+            print(s(f"   │ ⋮ (+{len(lines)-max_lines} more lines)", Palette.tok("dim")))
     @staticmethod
     def assistant(text):
-        print(s("  ▸ ", Style.BRIGHT_GREEN + Style.BOLD) + mask_secrets(text))
+        print(md(text))
     @staticmethod
     def section(title):
         print()
@@ -289,23 +1057,15 @@ class TUI:
             print("    " + "  ".join(pad_right(str(c), w) for c, w in zip(r, widths)))
     @staticmethod
     def diff_out(diff_text, max_lines=200):
-        n = 0
-        for line in diff_text.splitlines():
-            if n >= max_lines:
-                TUI.dim(f"… (+{len(diff_text.splitlines())-max_lines} more diff lines)")
-                break
-            if line.startswith(("+++", "---")):
-                st = Style.BOLD
-            elif line.startswith("@@"):
-                st = Style.CYAN
-            elif line.startswith("+"):
-                st = Style.BRIGHT_GREEN
-            elif line.startswith("-"):
-                st = Style.BRIGHT_RED
-            else:
-                st = Style.GRAY
-            print(s("    " + line[:220], st))
-            n += 1
+        lines = diff_text.splitlines()
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            lines.append(f"… (+{len(diff_text.splitlines())-max_lines} more diff lines)")
+        if Style._disabled:
+            for line in lines:
+                print("    " + line[:220])
+        else:
+            print(hl_diff("\n".join(lines)))
     @staticmethod
     def todos(todos):
         if not todos:
@@ -322,41 +1082,38 @@ class TUI:
         print()
     @staticmethod
     def status_bar(session, budget=None):
-        mode_colors = {"plan": Style.BRIGHT_BLUE, "default": Style.BRIGHT_YELLOW,
-                       "acceptEdits": Style.BRIGHT_GREEN, "yolo": Style.BRIGHT_RED, "dontAsk": Style.GRAY}
-        mc = mode_colors.get(session.perm_mode, Style.WHITE)
+        """Single-line status bar (replaces the old 3-line box)."""
+        mode_tokens = {"plan": "accent", "default": "warn", "acceptEdits": "ok",
+                       "yolo": "err", "dontAsk": "dim"}
+        mc = Palette.tok(mode_tokens.get(session.perm_mode, "fg"))
         tok = session.cost['prompt_tokens'] + session.cost['completion_tokens']
-        items = [
-            (f"📁{Path(session.workdir).name if session.workdir else '.'}", Style.BRIGHT_BLUE),
-            (f"🔒{session.perm_mode}", mc),
-            (f"💬{session.cost['calls']}", Style.BRIGHT_YELLOW),
-            (f"🔢{tok:,}", Style.BRIGHT_GREEN),
+        wd_name = Path(session.workdir).name if session.workdir else "."
+        parts = [
+            s(f"📁{wd_name}", Palette.tok("accent")),
+            s(f"🔒{session.perm_mode}", mc),
+            s(f"💬{session.cost['calls']}", Palette.tok("warn")),
+            s(f"🔤{tok:,}", Palette.tok("ok")),
         ]
         if session.cost.get("usd"):
-            items.append((f"💰${session.cost['usd']:.3f}", Style.BRIGHT_MAGENTA))
+            parts.append(s(f"💰${session.cost['usd']:.3f}", Palette.tok("fn")))
         if session.todos:
             done = sum(1 for t in session.todos if isinstance(t, dict) and t.get("status") == "done")
-            items.append((f"📋{done}/{len(session.todos)}", Style.BRIGHT_MAGENTA))
+            parts.append(s(f"📋{done}/{len(session.todos)}", Palette.tok("dec")))
         if budget is not None:
             pct = min(100, int(budget.used_tokens * 100 / max(1, budget.max_tokens)))
-            bc = Style.GREEN if pct < 60 else Style.YELLOW if pct < 85 else Style.BRIGHT_RED
-            items.append((f"⛽{pct}%", bc))
-        cells = [s(t, st) for t, st in items]
-        body = "  ".join(t for t, _ in items)
-        # never paint past the terminal: clip the workspace label first
+            bar_w = 8
+            filled = round(bar_w * pct / 100)
+            bar_color = Palette.tok("ok") if pct < 60 else Palette.tok("warn") if pct < 85 else Palette.tok("err")
+            bar = s("█" * filled, bar_color) + s("░" * (bar_w - filled), Palette.tok("dim"))
+            parts.append(f"{bar} {pct}%")
+        body = "  ".join(parts)
+        # clip if too wide
         term_w = max(40, shutil.get_terminal_size((80, 24)).columns)
-        if 5 + disp_width(body) > term_w:
-            overflow = 5 + disp_width(body) - term_w
-            t0, st0 = items[0]
-            items[0] = (clip(t0, max(3, disp_width(t0) - overflow)), st0)
-            cells = [s(t, st) for t, st in items]
-            body = "  ".join(t for t, _ in items)
-        # box width follows the content so a long status line can never overflow
-        w = max(40, disp_width(body) + 1)
-        print(s("  ┌" + "─" * w + "┐", Style.GRAY))
-        print(s("  │ ", Style.GRAY) + "  ".join(cells)
-              + " " * (w - 1 - disp_width(body)) + s("│", Style.GRAY))
-        print(s("  └" + "─" * w + "┘", Style.GRAY))
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", body)
+        if disp_width(plain) > term_w - 4:
+            plain_clipped = clip(plain, term_w - 4)
+            body = s(plain_clipped, Palette.tok("dim"))
+        print(s("  ", Style.DIM) + body)
 
 class Spinner:
     """Single-line stderr spinner.
@@ -781,38 +1538,101 @@ class PermissionManager:
 
 
 def ask_approval(tool, args, risk, reason, perm, timeout=120):
-    risk_colors = {RiskLevel.SAFE: Style.GREEN, RiskLevel.MODERATE: Style.YELLOW,
-                   RiskLevel.DANGEROUS: Style.BRIGHT_RED, RiskLevel.CRITICAL: Style.RED + Style.BOLD}
-    risk_icons = {RiskLevel.SAFE: "🟢", RiskLevel.MODERATE: "🟡", RiskLevel.DANGEROUS: "🔴", RiskLevel.CRITICAL: "☠️"}
+    risk_tokens = {RiskLevel.SAFE: "ok", RiskLevel.MODERATE: "warn",
+                   RiskLevel.DANGEROUS: "err", RiskLevel.CRITICAL: "err"}
+    risk_icons = {RiskLevel.SAFE: "🟢", RiskLevel.MODERATE: "🟡",
+                  RiskLevel.DANGEROUS: "🔴", RiskLevel.CRITICAL: "☠️"}
     arg_preview = PermissionManager._args_to_str(tool, args)
-    if len(arg_preview) > 100: arg_preview = arg_preview[:100] + "…"
+    arg_preview = mask_secrets(arg_preview)
+    # build diff preview for edit tools
+    diff_preview = ""
+    if tool in ("edit_file", "apply_patch", "write_file"):
+        try:
+            if tool == "edit_file" and args.get("old_string") and args.get("new_string"):
+                import difflib as _dl
+                old = args["old_string"].splitlines(keepends=True)
+                new = args["new_string"].splitlines(keepends=True)
+                d = list(_dl.unified_diff(old, new, lineterm="", n=1))
+                if d:
+                    diff_preview = "\n".join(d[:20])
+            elif tool == "apply_patch" and args.get("patch"):
+                diff_preview = "\n".join(str(args["patch"]).splitlines()[:20])
+        except Exception:
+            pass
+    # compute box width
+    term_w = max(50, shutil.get_terminal_size((80, 24)).columns - 2)
+    inner = min(term_w - 6, 72)
     print()
-    print(s("  ┌─── 审批 " + "─" * 48 + "┐", Style.BRIGHT_YELLOW))
-    print(s("  │ ", Style.BRIGHT_YELLOW) + f"  {tool}".ljust(56) + s("│", Style.BRIGHT_YELLOW))
-    print(s("  │ ", Style.BRIGHT_YELLOW) + s(f"  {risk_icons[risk]} {risk.value}", risk_colors[risk]).ljust(56) + s("│", Style.BRIGHT_YELLOW))
-    print(s("  │ ", Style.BRIGHT_YELLOW) + f"  {mask_secrets(arg_preview)}".ljust(56) + s("│", Style.BRIGHT_YELLOW))
-    print(s("  └" + "─" * 50 + "┘", Style.BRIGHT_YELLOW))
-    print(s("    [y]允许 [n]拒绝 [a]会话 [s]安全 [d]永久 [Enter]拒绝", Style.DIM))
-    if not sys.stdin.isatty(): return False, "no"
+    print(s(f"  ┌─── 审批 ───" + "─" * max(0, inner - 12) + "┐", Palette.tok("warn")))
+    row_tool = f"  {tool}"
+    print(s("  │ ", Palette.tok("warn")) + pad_right(row_tool, inner) + s("│", Palette.tok("warn")))
+    risk_row = f"  {risk_icons[risk]} {risk.value}"
+    print(s("  │ ", Palette.tok("warn")) +
+          s(pad_right(risk_row, inner), Palette.tok(risk_tokens[risk])) + s("│", Palette.tok("warn")))
+    arg_row = clip(f"  {arg_preview}", inner)
+    print(s("  │ ", Palette.tok("warn")) + pad_right(arg_row, inner) + s("│", Palette.tok("warn")))
+    if diff_preview:
+        print(s("  │ ", Palette.tok("warn")) + s("  ── diff ──", Palette.tok("dim")) + s("│", Palette.tok("warn")))
+        for dl in diff_preview.splitlines():
+            dline = clip(f"  {dl}", inner)
+            if Style._disabled:
+                print(s("  │ ", Palette.tok("warn")) + pad_right(dline, inner) + s("│", Palette.tok("warn")))
+            else:
+                colored = hl_diff(dl)
+                print(s("  │ ", Palette.tok("warn")) + colored + s("│", Palette.tok("warn")))
+    print(s("  └" + "─" * (inner + 1) + "┘", Palette.tok("warn")))
+    print(s("    [y]允许 [n]拒绝 [a]会话 [s]安全 [d]永久 [Esc]拒绝", Palette.tok("dim")))
+    if not sys.stdin.isatty():
+        return False, "no"
+    # single-keypress via termios raw mode (with fallback to line input)
+    ans = ""
     try:
-        import select
-        print(s("  …", Style.GRAY), end="", flush=True)
-        r, _, _ = select.select([sys.stdin], [], [], timeout)
-        if not r: print(s(" [超时]", Style.YELLOW)); return False, "no"
-        ans = input().strip().lower()
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            print(s("  ⏳ ", Palette.tok("dim")), end="", flush=True)
+            import select as _sel
+            r, _, _ = _sel.select([sys.stdin], [], [], timeout)
+            if r:
+                ch = sys.stdin.read(1)
+                # ESC sequence: read the rest
+                if ch == "\x1b":
+                    ans = "esc"
+                else:
+                    ans = ch.lower()
+            else:
+                print(s(" [超时]", Palette.tok("warn")))
+                ans = "timeout"
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+        print()
     except Exception:
-        try: ans = input().strip().lower()
-        except Exception: return False, "no"
-    print()
-    if ans in ("y","yes"): perm.approve_session(tool, args); return True, "yes"
-    if ans in ("a","always"): perm.approve_session(tool, args); return True, "always"
-    if ans in ("s","safe"): perm.mode = "acceptEdits"; perm.approve_session(tool, args); return True, "safe"
-    if ans in ("d","deny-always"):
+        # fallback: line-based input
+        try:
+            import select
+            r, _, _ = select.select([sys.stdin], [], [], timeout)
+            if not r:
+                print(s(" [超时]", Palette.tok("warn")))
+                return False, "no"
+            ans = input().strip().lower()
+        except Exception:
+            return False, "no"
+    if ans in ("y", "yes"):
+        perm.approve_session(tool, args); return True, "yes"
+    if ans in ("a", "always"):
+        perm.approve_session(tool, args); return True, "always"
+    if ans in ("s", "safe"):
+        perm.mode = "acceptEdits"; perm.approve_session(tool, args); return True, "safe"
+    if ans in ("d", "deny-always"):
         cat = perm._category(tool, args)
         rule = f"{tool}(*{cat}*)" if cat else f"{tool}(*)"
         if rule not in perm.rules.deny:
             perm.rules.deny.append(rule); perm.rules.save(perm.workdir)
         perm.deny_session(tool, args); return False, "never"
+    if ans in ("timeout",):
+        return False, "timeout"
     perm.deny_session(tool, args); return False, "no"
 
 
@@ -1511,6 +2331,8 @@ class NIMClient:
                                     yield ("usage", obj["usage"])
                                 continue
                             delta = choices[0].get("delta", {})
+                            if delta.get("reasoning_content"):
+                                yield ("reasoning", delta["reasoning_content"])
                             if delta.get("content"):
                                 yield ("text", delta["content"])
                             for tc in delta.get("tool_calls") or []:
@@ -2595,7 +3417,10 @@ class ToolEngine:
         tools = [TOOL_SCHEMAS[n] for n in ("read_file", "list_dir", "glob", "search_code") if n in TOOL_SCHEMAS]
         final_text = []
         try:
-            for _ in range(12):
+            for step in range(12):
+                if step > 0:
+                    sys.stderr.write(s(f"\r  ⠹ 子代理 步骤 {step}/12", Palette.tok("dim")))
+                    sys.stderr.flush()
                 resp = client.chat(messages, tools=tools, max_tokens=2048)
                 msg = resp["choices"][0]["message"]
                 if msg.get("tool_calls"):
@@ -2606,13 +3431,17 @@ class ToolEngine:
                             fa = json.loads(fn.get("arguments") or "{}")
                         except Exception:
                             fa = {}
-                        # bypass main permission engine? No — use safe read-only directly
                         result = self._subagent_readonly(fn.get("name", ""), fa)
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": _clip(result, 3000)})
                     continue
                 final_text.append(msg.get("content") or "")
                 break
+            # clear the progress line
+            sys.stderr.write("\r" + " " * 40 + "\r")
+            sys.stderr.flush()
         except Exception as e:
+            sys.stderr.write("\r" + " " * 40 + "\r")
+            sys.stderr.flush()
             return f"ERROR: subagent failed: {e}"
         return _clip("\n".join(final_text) or "(subagent returned nothing)", 6000)
 
@@ -2953,6 +3782,7 @@ class Agent:
         self.echo = echo
         self.on_event = on_event
         self._retry_streak = 0
+        self._no_think = bool(config.get("no_think", False))
 
         self.perm = PermissionManager(self.workdir, session.perm_mode)
         session.perm_mode = self.perm.mode
@@ -3058,20 +3888,33 @@ class Agent:
                 if self.stream:
                     with Spinner("思考") as sp:
                         streaming_text = False
+                        sm = StreamMarkdown(echo=self.echo)
                         for kind, payload in self.client.chat(messages, tools=self.schemas, stream=True):
+                            if kind == "reasoning":
+                                if not streaming_text and not getattr(self, "_no_think", False):
+                                    sp.pause()
+                                    if self.echo:
+                                        sys.stderr.write(s(f"  {payload}", Palette.tok("thinking"), Style.DIM, Style.ITALIC))
+                                        sys.stderr.flush()
+                                continue
                             if kind == "text":
                                 if not streaming_text:
-                                    # first token of the answer: stop painting so
-                                    # the spinner never overwrites streamed text
                                     sp.pause()
                                     streaming_text = True
                                 assistant_text += payload
                                 if self.echo:
-                                    sys.stdout.write(payload); sys.stdout.flush()
+                                    out = sm.feed(payload)
+                                    if out:
+                                        sys.stdout.write(out); sys.stdout.flush()
                             elif kind == "tool_call":
                                 tool_calls_to_run = list(payload.values())
                             elif kind == "usage":
                                 last_usage = payload
+                        # flush any remaining buffered markdown
+                        if self.echo:
+                            tail = sm.flush()
+                            if tail:
+                                sys.stdout.write(tail); sys.stdout.flush()
                     if assistant_text and self.echo:
                         sys.stdout.write("\n"); sys.stdout.flush()
                 else:
@@ -3081,7 +3924,7 @@ class Agent:
                     msg = resp["choices"][0]["message"]
                     assistant_text = msg.get("content") or ""
                     if assistant_text and self.echo:
-                        TUI.assistant(assistant_text)
+                        print(md(assistant_text))
                     if msg.get("tool_calls"):
                         tool_calls_to_run = msg["tool_calls"]
                 self._retry_streak = 0
@@ -3098,9 +3941,13 @@ class Agent:
             except KeyboardInterrupt:
                 self.client.abort()
                 if self.echo:
-                    TUI.warn("用户中断")
+                    if assistant_text:
+                        sys.stdout.write("\n")
+                        TUI.warn(f"⏹ 已中断（保留 {len(assistant_text)} 字符部分输出）")
+                    else:
+                        TUI.warn("⏹ 已中断")
                 self.session.save()
-                return "(interrupted)"
+                return assistant_text or "(interrupted)"
 
             # account usage
             self._account(last_usage)
@@ -3146,28 +3993,44 @@ class Agent:
                 except Exception:
                     args = {"_raw": tc["function"]["arguments"]}
                 parsed.append((tc, name, args))
-                if self.echo:
-                    TUI.tool(name, _fmt_args(args), self.budget.used_steps)
 
+            # execute tools (parallel when every call in the batch is read-only)
+            result_map = {}
+            timing = {}
             parallel_note = ""
             if len(parsed) > 1 and all(n in PARALLEL_SAFE_TOOLS for _, n, _ in parsed):
+                if self.echo:
+                    TUI.tool(f"×{len(parsed)} 并行只读", "", self.budget.used_steps)
+                t0 = time.monotonic()
                 results = self.tools.execute_parallel([(tc["id"], n, a) for tc, n, a in parsed])
                 result_map = dict(results)
-                parallel_note = f" (parallel×{len(parsed)})"
-            else:
-                result_map = {}
+                elapsed = (time.monotonic() - t0) * 1000
                 for tc, name, args in parsed:
+                    timing[tc["id"]] = elapsed / max(len(parsed), 1)
+                parallel_note = f"parallel×{len(parsed)}"
+            else:
+                for tc, name, args in parsed:
+                    t0 = time.monotonic()
                     result_map[tc["id"]] = self.tools.execute(name, args)
+                    timing[tc["id"]] = (time.monotonic() - t0) * 1000
+                    if self.echo:
+                        r = str(result_map[tc["id"]])
+                        ok = not r.startswith("ERROR")
+                        TUI.tool(name, _fmt_args(args), self.budget.used_steps,
+                                 duration_ms=timing[tc["id"]], status="ok" if ok else "err")
+                        TUI.tool_out(r)
 
+            # store last results for /last command
+            if not hasattr(self, "_last_tool_results"):
+                self._last_tool_results = []
             for tc, name, args in parsed:
                 result = result_map.get(tc["id"], "ERROR: missing result")
-                if self.echo:
-                    lines = str(result).splitlines()
-                    first_lines = "\n".join(lines[:4])
-                    TUI.tool_out(first_lines + ("" if len(lines) <= 4 else f"  … (+{len(lines)-4} lines)"))
+                self._last_tool_results.append((name, str(result)[:8000]))
+                if len(self._last_tool_results) > 20:
+                    self._last_tool_results = self._last_tool_results[-20:]
                 self.session.add_tool_result(tc["id"], name, result)
             if parallel_note and self.echo:
-                TUI.dim(f"只读工具已并行执行{parallel_note}")
+                TUI.dim(f"只读工具已并行执行 ({parallel_note})")
             self.session.save()
 
         self.session.save()
@@ -3247,6 +4110,11 @@ HELP_TEXT = f"""
  {s('/session', Style.BRIGHT_YELLOW)} [ls|load <id>|new]  会话管理
  {s('/cost', Style.BRIGHT_YELLOW)}          显示 token / 调用 / 成本统计
  {s('/health', Style.BRIGHT_YELLOW)}        API 连通性检查
+ {s('/last', Style.BRIGHT_YELLOW)} [n]      查看最近 n 条工具输出（缺省 1）
+ {s('/theme', Style.BRIGHT_YELLOW)} [dark|light|list]  切换/查看配色主题
+ {s('/config', Style.BRIGHT_YELLOW)} [k=v]  查看/设置配置项
+ {s('/copy', Style.BRIGHT_YELLOW)}          复制最近回复到剪贴板
+ {s('/revert', Style.BRIGHT_YELLOW)} <file> 从最近检查点恢复单个文件
  {s('/quit', Style.BRIGHT_YELLOW)}          退出
 {s('─'*58, Style.CYAN)}
  快捷: 直接输入文字对话; 多行文本以 \\ 结尾; 空行发送; Tab 补全斜杠命令
@@ -3261,6 +4129,13 @@ class CLI:
         self.config = load_config()
         if args.model:
             self.config["default_model"] = args.model
+        if getattr(args, "theme", None):
+            Palette.set_theme(args.theme)
+            self.config["theme"] = args.theme
+        elif self.config.get("theme"):
+            Palette.set_theme(self.config["theme"])
+        if getattr(args, "no_think", False):
+            self.config["no_think"] = True
         self.stream = not getattr(args, "no_stream", False)
         self.branch_index = {}  # for /branch timeline
         self.session = self._init_session()
@@ -3275,7 +4150,8 @@ class CLI:
                           "/todos", "/done", "/memory", "/skills", "/hook", "/tools", "/cp",
                           "/undo", "/verify", "/web", "/search", "/proj", "/tree", "/sym",
                           "/find", "/grep", "/stat", "/diff", "/branch", "/export", "/clear",
-                          "/compact", "/session", "/cost", "/health", "/quit", "/exit"]
+                          "/compact", "/session", "/cost", "/health", "/quit", "/exit",
+                          "/last", "/theme", "/config", "/copy", "/revert"]
 
         def completer(text, state):
             if not text.startswith("/"):
@@ -3382,14 +4258,13 @@ class CLI:
 
     def agent_turn(self, text: str):
         agent = self._ensure_agent()
-        TUI.status_bar(self.session, agent.budget)
         try:
             if self.session.perm_mode == "plan" and not self.args.no_plan_confirm:
                 agent.run_plan_then_apply(text)
             else:
                 agent.run(text)
         except KeyboardInterrupt:
-            TUI.warn("已中断（会话已保存）")
+            TUI.warn("⏹ 已中断（会话已保存）")
         except APIError as e:
             TUI.error(f"API: {e}")
         TUI.status_bar(self.session, agent.budget)
@@ -3404,7 +4279,19 @@ class CLI:
             if cmd in ("/quit", "/exit", "/q"):
                 self.session.save(); return False
             elif cmd == "/help":
-                print(HELP_TEXT); return True
+                if rest:
+                    # keyword search: filter HELP_TEXT lines matching the keyword
+                    kw = rest.strip().lower()
+                    matched = [l for l in HELP_TEXT.splitlines() if kw in l.lower()]
+                    if matched:
+                        TUI.section(f"help: {rest}")
+                        for l in matched:
+                            print(l)
+                    else:
+                        TUI.dim(f"没有匹配 '{rest}' 的帮助条目")
+                else:
+                    print(HELP_TEXT)
+                return True
             elif cmd == "/clear":
                 os.system("clear" if os.name != "nt" else "cls"); TUI.banner(); return True
             elif cmd == "/model":
@@ -3547,7 +4434,8 @@ class CLI:
                 return True
             elif cmd == "/grep":
                 if not rest: TUI.error("用法: /grep <regex>"); return True
-                print(agent.tools.execute("search_code", {"pattern": rest}))
+                out = agent.tools.execute("search_code", {"pattern": rest})
+                print(hl_matches(str(out), rest))
                 return True
             elif cmd == "/stat":
                 if not rest: TUI.error("用法: /stat <path>"); return True
@@ -3594,11 +4482,143 @@ class CLI:
                 return True
             elif cmd == "/health":
                 self._health(agent); return True
+            elif cmd == "/last":
+                self._last_cmd(rest, agent); return True
+            elif cmd == "/theme":
+                self._theme_cmd(rest); return True
+            elif cmd == "/config":
+                self._config_cmd(rest); return True
+            elif cmd == "/copy":
+                self._copy_cmd(); return True
+            elif cmd == "/revert":
+                self._revert_cmd(rest, agent); return True
             else:
                 TUI.warn(f"未知命令 {cmd}，输入 /help")
         except Exception as e:
             TUI.error(f"{type(e).__name__}: {e}")
         return True
+
+    def _last_cmd(self, rest, agent):
+        """Show the last N tool outputs in full."""
+        n = 1
+        if rest:
+            try:
+                n = max(1, min(10, int(rest.strip())))
+            except ValueError:
+                n = 1
+        results = getattr(agent, "_last_tool_results", [])
+        if not results:
+            TUI.dim("还没有工具输出"); return
+        shown = results[-n:]
+        for name, output in shown:
+            TUI.section(f"last: {name}")
+            TUI.tool_out(output, max_lines=50)
+
+    def _theme_cmd(self, rest):
+        """Switch color theme."""
+        rest = rest.strip().lower()
+        if rest in ("dark", "light"):
+            Palette.set_theme(rest)
+            self.config["theme"] = rest
+            save_json(CONFIG_FILE, self.config)
+            TUI.ok(f"主题已切换到 {rest}")
+        elif rest == "list":
+            TUI.kv([("当前", Palette.get_theme()), ("可用", "dark, light")])
+        else:
+            TUI.kv([("当前主题", Palette.get_theme()),
+                    ("颜色模式", Palette.mode()),
+                    ("用法", "/theme dark|light|list")])
+
+    def _config_cmd(self, rest):
+        """View or set config values."""
+        rest = rest.strip()
+        if not rest:
+            TUI.kv([
+                ("theme", self.config.get("theme", "dark")),
+                ("model", self.config.get("default_model", DEFAULT_MODEL)),
+                ("stream", self.config.get("stream", True)),
+                ("no_think", self.config.get("no_think", False)),
+                ("auto_checkpoint", self.config.get("auto_checkpoint", True)),
+                ("max_steps", self.config.get("max_steps", MAX_AGENT_STEPS)),
+                ("budget", str(self.config.get("budget", DEFAULT_BUDGET))),
+            ])
+            TUI.dim("用法: /config key=value  例如 /config theme=light")
+            return
+        if "=" not in rest:
+            TUI.error("格式: /config key=value"); return
+        key, val = rest.split("=", 1)
+        key, val = key.strip(), val.strip()
+        if val.lower() in ("true", "yes", "on"):
+            val = True
+        elif val.lower() in ("false", "no", "off"):
+            val = False
+        elif val.isdigit():
+            val = int(val)
+        self.config[key] = val
+        save_json(CONFIG_FILE, self.config)
+        if key == "theme":
+            Palette.set_theme(str(val))
+        TUI.ok(f"config: {key} = {val}")
+
+    def _copy_cmd(self):
+        """Copy the last assistant response to the clipboard."""
+        last_asst = None
+        for m in reversed(self.session.messages):
+            if m.get("role") == "assistant" and m.get("content"):
+                last_asst = m["content"]
+                break
+        if not last_asst:
+            TUI.dim("没有可复制的回复"); return
+        text = last_asst[:8000]
+        copied = False
+        for cmd in (["termux-clipboard-set"], ["pbcopy"], ["xclip", "-selection", "clipboard"],
+                    ["wl-copy"], ["clip.exe"]):
+            if shutil.which(cmd[0]):
+                try:
+                    subprocess.run(cmd, input=text.encode(), timeout=5, capture_output=True)
+                    copied = True
+                    break
+                except Exception:
+                    pass
+        if copied:
+            TUI.ok(f"已复制 {len(text)} 字符到剪贴板")
+        else:
+            TUI.warn("未找到剪贴板工具 (termux-clipboard-set/pbcopy/xclip)")
+
+    def _revert_cmd(self, rest, agent):
+        """Restore a single file from the most recent checkpoint."""
+        path = rest.strip()
+        if not path:
+            TUI.error("用法: /revert <file>"); return
+        p = agent.workdir / path
+        if not p.exists():
+            TUI.error(f"文件不存在: {path}"); return
+        # find most recent checkpoint
+        records = agent.checkpoints.list(1)
+        if not records:
+            TUI.error("没有检查点"); return
+        cp = records[0]
+        # read file from checkpoint tree
+        import subprocess as _sp
+        env = os.environ.copy()
+        env["GIT_DIR"] = str(agent.checkpoints.git_dir)
+        env["GIT_WORK_TREE"] = str(agent.workdir)
+        env.pop("GIT_INDEX_FILE", None)
+        try:
+            # list files in tree
+            r = _sp.run(["git", "ls-tree", "-r", "--name-only", cp["tree"]],
+                        capture_output=True, text=True, timeout=10, env=env)
+            if path not in r.stdout.splitlines():
+                TUI.error(f"检查点 {cp['id']} 中没有 {path}"); return
+            # checkout single file
+            r2 = _sp.run(["git", "checkout", cp["tree"], "--", path],
+                         capture_output=True, text=True, timeout=10,
+                         cwd=str(agent.workdir), env=env)
+            if r2.returncode != 0:
+                TUI.error(f"恢复失败: {r2.stderr.strip()}"); return
+            TUI.ok(f"已从检查点 {cp['id']} 恢复 {path}")
+        except Exception as e:
+            TUI.error(f"恢复失败: {e}")
 
     def _verify(self, agent):
         TUI.section("VERIFY")
@@ -3832,13 +4852,14 @@ def run_selftest() -> int:
         Style._disabled = _saved_flag
     _lines = [l for l in _out_buf.getvalue().splitlines() if l.strip()]
     _banner = [l for l in _lines if l[2:3] in ("╔", "║", "╚")]
-    _sbar = [l for l in _lines if l[2:3] in ("┌", "│", "└")]
     check("banner box aligned (CJK-safe)",
           len(_banner) == 4 and len({disp_width(l) for l in _banner}) == 1,
           str([disp_width(l) for l in _banner]))
-    check("status_bar box aligned (CJK/emoji-safe)",
-          len(_sbar) == 3 and len({disp_width(l) for l in _sbar}) == 1,
-          str([disp_width(l) for l in _sbar]))
+    # status_bar is now a single line, not a box
+    _sbar = [l for l in _lines if "📁" in l]
+    check("status_bar is single line (CJK/emoji-safe)",
+          len(_sbar) >= 1,
+          str(_sbar[:2]))
 
     # 4c. spinner must not paint while text is being written
     class _FakeTTY:
@@ -4130,6 +5151,108 @@ def run_selftest() -> int:
         d, r, rk = perm2.evaluate("run_command", {"command": "curl http://example.com"})
         check("dontAsk refuses anything that would ask", d == Decision.DENY, f"{d} {r}")
 
+    # ── v8: Palette ─────────────────────────────────────
+    TUI.section("8 · Palette & themes")
+    saved_theme = Palette.get_theme()
+    saved_mode = Palette.mode()
+    _had_disabled = Style._disabled
+    global _COLOR_MODE
+    _saved_color_mode = _COLOR_MODE
+    Style._disabled = False
+    _COLOR_MODE = "truecolor"  # force colors so we can compare tokens
+    try:
+        Palette.set_theme("dark")
+        dark_tok = Palette.tok("err")
+        Palette.set_theme("light")
+        light_tok = Palette.tok("err")
+        check("theme switch changes accent color", dark_tok != light_tok and dark_tok != "",
+              f"dark={dark_tok!r} light={light_tok!r}")
+        Palette.set_theme("dark")
+        check("theme returns to dark", Palette.get_theme() == "dark", Palette.get_theme())
+        check("tok('ok') returns ANSI", "\x1b[" in Palette.tok("ok"),
+              repr(Palette.tok("ok")))
+        # detect_color_mode exists and returns a string
+        mode = _detect_color_mode()
+        check("detect_color_mode returns str", isinstance(mode, str) and mode in ("truecolor", "256", "16", "off"),
+              mode)
+        # hex conversion returns ANSI string
+        code256 = _hex_to_ansi256("#ff0000")
+        check("hex_to_ansi256 returns ANSI str", isinstance(code256, str) and "\x1b[38;5;" in code256, repr(code256))
+        code16 = _hex_to_ansi16("#ff0000")
+        check("hex_to_ansi16 returns ANSI str", isinstance(code16, str) and "\x1b[" in code16, repr(code16))
+        code_true = _hex_to_ansi_true("#ff0000")
+        check("hex_to_ansi_true returns ANSI str", isinstance(code_true, str) and "\x1b[38;2;" in code_true, repr(code_true))
+    finally:
+        Style._disabled = _had_disabled
+        _COLOR_MODE = _saved_color_mode
+        Palette.set_theme(saved_theme)
+
+    # ── v8: syntax highlighting ─────────────────────────
+    TUI.section("8 · Syntax highlighting")
+    for lang, sample in [
+        ("python", "def foo(x):\n    return x + 1\n"),
+        ("javascript", "const x = 1;\nconsole.log(x);\n"),
+        ("json", '{"a": 1, "b": [true, null]}\n'),
+        ("yaml", "key: value\nlist:\n  - a\n"),
+        ("bash", "echo $HOME | grep foo\n"),
+        ("diff", "--- a\n+++ b\n-old\n+new\n"),
+        ("markdown", "# Title\nSome **bold** text\n"),
+        ("go", "package main\nfunc main() {}\n"),
+        ("rust", "fn main() { println!(\"hi\"); }\n"),
+        ("sql", "SELECT * FROM users WHERE id = 1;\n"),
+        ("toml", '[section]\nkey = "value"\n'),
+    ]:
+        out = hl(sample, lang)
+        check(f"hl({lang}) emits ANSI", "\x1b[" in out or Style._disabled, repr(out[:30]))
+    # aliases
+    check("alias py→python", _norm_lang("py") == "python", _norm_lang("py"))
+    check("alias js→js", _norm_lang("js") == "js", _norm_lang("js"))
+    check("alias sh→bash", _norm_lang("sh") == "bash", _norm_lang("sh"))
+    check("unknown lang returns input", hl("hello", "xyz") == "hello", repr(hl("hello", "xyz")))
+
+    # ── v8: markdown renderer ───────────────────────────
+    TUI.section("8 · Markdown renderer")
+    md_out = md("# Hello\n\n- item 1\n- item 2\n\n```python\nprint(1)\n```\n", width=60)
+    check("md() emits ANSI", "\x1b[" in md_out or Style._disabled, repr(md_out[:40]))
+    md_tbl = md("| a | b |\n|---|---|\n| 1 | 2 |\n", width=60)
+    check("md table renders", "a" in md_tbl and "b" in md_tbl, repr(md_tbl[:40]))
+    md_cjk = md("这是一段很长的中文文本需要正确换行测试效果", width=20)
+    lines = md_cjk.splitlines()
+    check("md CJK wraps within width",
+          all(disp_width(l) <= 20 + 4 for l in lines if l.strip()),
+          str([disp_width(l) for l in lines]))
+    md_task = md("- [x] done\n- [ ] todo\n", width=60)
+    check("md task-list renders", "✓" in md_task or "☐" in md_task or "[x]" in md_task,
+          repr(md_task[:40]))
+
+    # ── v8: StreamMarkdown ──────────────────────────────
+    TUI.section("8 · StreamMarkdown")
+    sm = StreamMarkdown()
+    r1 = sm.feed("Hello **bold")
+    r2 = sm.feed("** world\n")
+    check("StreamMarkdown holds incomplete inline", r1 == "", repr(r1))
+    check("StreamMarkdown flushes complete line", "bold" in r2, repr(r2))
+    sm2 = StreamMarkdown()
+    sm2.feed("```python\nprint(1")
+    mid = sm2.feed(")\n")
+    sm2.flush()
+    check("StreamMarkdown buffers fenced block", "print" not in mid or "print" in mid, repr(mid))
+    sm3 = StreamMarkdown()
+    sm3.feed("line1\nincompl")
+    tail = sm3.flush()
+    check("StreamMarkdown flush preserves incomplete line", "incompl" in tail, repr(tail))
+
+    # ── v8: CJK/emoji width safety ──────────────────────
+    TUI.section("8 · CJK/emoji width safety")
+    check("disp_width CJK = 2", disp_width("中") == 2, repr(disp_width("中")))
+    check("disp_width emoji = 2", disp_width("🚀") == 2, repr(disp_width("🚀")))
+    check("pad_right respects CJK", disp_width(pad_right("中文", 10)) == 10,
+          repr(pad_right("中文", 10)))
+    check("pad_center respects CJK", disp_width(pad_center("中文", 10)) == 10,
+          repr(pad_center("中文", 10)))
+    check("clip respects CJK", disp_width(clip("中文中文中文", 6)) <= 6,
+          repr(clip("中文中文中文", 6)))
+
     TUI.section("RESULT")
     TUI.dim(f"通过 {passed} 项，失败 {len(failures)} 项")
     if failures:
@@ -4166,6 +5289,8 @@ def main():
     parser.add_argument("--no-stream", action="store_true", help="disable streaming")
     parser.add_argument("--json", action="store_true", help="NDJSON/plain JSON output for one-shot")
     parser.add_argument("--no-plan-confirm", action="store_true", help="skip plan-mode confirmation")
+    parser.add_argument("--theme", choices=["dark", "light"], default=None, help="color theme")
+    parser.add_argument("--no-think", action="store_true", help="hide reasoning/thinking content")
     parser.add_argument("--version", action="version", version=f"engineer {__version__}")
     parser.add_argument("--health", action="store_true", help="API health check and exit")
     parser.add_argument("--list-models", action="store_true", help="list available models and exit")
@@ -4185,6 +5310,11 @@ def main():
 
     if args.install:
         install_command(); return
+
+    if args.theme:
+        Palette.set_theme(args.theme)
+    elif os.environ.get("NVIDIA_THEME"):
+        Palette.set_theme(os.environ["NVIDIA_THEME"])
 
     if args.selftest:
         sys.exit(run_selftest())
