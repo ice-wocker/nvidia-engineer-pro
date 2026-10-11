@@ -229,7 +229,8 @@ def _hex_to_ansi16(hex_color: str) -> str:
         return "\033[96m"  # cyan
     return "\033[37m"
 
-# ── Theme definitions (GitHub-inspired) ──────────────────────────────────────
+# ── Theme definitions (GitHub + popular terminal palettes) ──────────────────
+# Every theme must define the same token keys as "dark" below.
 _THEMES = {
     "dark": {
         "kw": "#ff7b72", "str": "#a5d6ff", "com": "#8b949e", "num": "#79c0ff",
@@ -253,7 +254,105 @@ _THEMES = {
         "status": "#57606a", "prompt": "#0969da", "border": "#d0d7de",
         "sel": "#0969da", "thinking": "#57606a",
     },
+    "nord": {
+        "kw": "#81a1c1", "str": "#a3be8c", "com": "#616e88", "num": "#b48ead",
+        "fn": "#88c0d0", "typ": "#8fbcbb", "op": "#81a1c1", "pun": "#d8dee9",
+        "builtin": "#88c0d0", "dec": "#8fbcbb", "ok": "#a3be8c", "err": "#bf616a",
+        "warn": "#ebcb8b", "dim": "#4c566a", "link": "#88c0d0", "heading": "#88c0d0",
+        "table": "#434c5e", "accent": "#88c0d0", "bg": "#2e3440", "fg": "#eceff4",
+        "quote": "#616e88", "diff_add": "#a3be8c", "diff_del": "#bf616a",
+        "diff_hunk": "#88c0d0", "diff_meta": "#616e88", "spinner": "#88c0d0",
+        "status": "#4c566a", "prompt": "#88c0d0", "border": "#434c5e",
+        "sel": "#5e81ac", "thinking": "#616e88",
+    },
+    "solarized": {
+        "kw": "#859900", "str": "#2aa198", "com": "#657b83", "num": "#d33682",
+        "fn": "#268bd2", "typ": "#b58900", "op": "#859900", "pun": "#839496",
+        "builtin": "#268bd2", "dec": "#cb4b16", "ok": "#859900", "err": "#dc322f",
+        "warn": "#b58900", "dim": "#586e75", "link": "#268bd2", "heading": "#268bd2",
+        "table": "#073642", "accent": "#268bd2", "bg": "#002b36", "fg": "#93a1a1",
+        "quote": "#657b83", "diff_add": "#859900", "diff_del": "#dc322f",
+        "diff_hunk": "#268bd2", "diff_meta": "#657b83", "spinner": "#268bd2",
+        "status": "#586e75", "prompt": "#268bd2", "border": "#073642",
+        "sel": "#268bd2", "thinking": "#657b83",
+    },
+    "tokyonight": {
+        "kw": "#bb9af7", "str": "#9ece6a", "com": "#565f89", "num": "#ff9e64",
+        "fn": "#7aa2f7", "typ": "#2ac3de", "op": "#bb9af7", "pun": "#a9b1d6",
+        "builtin": "#7aa2f7", "dec": "#ff9e64", "ok": "#9ece6a", "err": "#f7768e",
+        "warn": "#e0af68", "dim": "#414868", "link": "#7aa2f7", "heading": "#7aa2f7",
+        "table": "#292e42", "accent": "#7aa2f7", "bg": "#1a1b26", "fg": "#c0caf5",
+        "quote": "#565f89", "diff_add": "#9ece6a", "diff_del": "#f7768e",
+        "diff_hunk": "#7aa2f7", "diff_meta": "#565f89", "spinner": "#7aa2f7",
+        "status": "#414868", "prompt": "#7aa2f7", "border": "#292e42",
+        "sel": "#33467c", "thinking": "#565f89",
+    },
+    "catppuccin": {
+        "kw": "#cba6f7", "str": "#a6e3a1", "com": "#6c7086", "num": "#fab387",
+        "fn": "#89b4fa", "typ": "#94e2d5", "op": "#cba6f7", "pun": "#cdd6f4",
+        "builtin": "#89b4fa", "dec": "#fab387", "ok": "#a6e3a1", "err": "#f38ba8",
+        "warn": "#f9e2af", "dim": "#585b70", "link": "#89b4fa", "heading": "#89b4fa",
+        "table": "#313244", "accent": "#89b4fa", "bg": "#1e1e2e", "fg": "#cdd6f4",
+        "quote": "#6c7086", "diff_add": "#a6e3a1", "diff_del": "#f38ba8",
+        "diff_hunk": "#89b4fa", "diff_meta": "#6c7086", "spinner": "#89b4fa",
+        "status": "#585b70", "prompt": "#89b4fa", "border": "#313244",
+        "sel": "#45475a", "thinking": "#6c7086",
+    },
+    "dracula": {
+        "kw": "#ff79c6", "str": "#f1fa8c", "com": "#6272a4", "num": "#bd93f9",
+        "fn": "#50fa7b", "typ": "#8be9fd", "op": "#ff79c6", "pun": "#f8f8f2",
+        "builtin": "#8be9fd", "dec": "#ffb86c", "ok": "#50fa7b", "err": "#ff5555",
+        "warn": "#f1fa8c", "dim": "#6272a4", "link": "#8be9fd", "heading": "#bd93f9",
+        "table": "#44475a", "accent": "#bd93f9", "bg": "#282a36", "fg": "#f8f8f2",
+        "quote": "#6272a4", "diff_add": "#50fa7b", "diff_del": "#ff5555",
+        "diff_hunk": "#8be9fd", "diff_meta": "#6272a4", "spinner": "#bd93f9",
+        "status": "#6272a4", "prompt": "#bd93f9", "border": "#44475a",
+        "sel": "#44475a", "thinking": "#6272a4",
+    },
+    "monokai": {
+        "kw": "#f92672", "str": "#e6db74", "com": "#75715e", "num": "#ae81ff",
+        "fn": "#a6e22e", "typ": "#66d9ef", "op": "#f92672", "pun": "#f8f8f2",
+        "builtin": "#66d9ef", "dec": "#fd971f", "ok": "#a6e22e", "err": "#f92672",
+        "warn": "#e6db74", "dim": "#75715e", "link": "#66d9ef", "heading": "#a6e22e",
+        "table": "#3e3d32", "accent": "#66d9ef", "bg": "#272822", "fg": "#f8f8f2",
+        "quote": "#75715e", "diff_add": "#a6e22e", "diff_del": "#f92672",
+        "diff_hunk": "#66d9ef", "diff_meta": "#75715e", "spinner": "#66d9ef",
+        "status": "#75715e", "prompt": "#66d9ef", "border": "#3e3d32",
+        "sel": "#49483e", "thinking": "#75715e",
+    },
 }
+
+def _lerp_hex(c1: str, c2: str, t: float) -> str:
+    """Linear-interpolate between two #RRGGBB colors (t in 0..1)."""
+    a = c1.lstrip("#"); b = c2.lstrip("#")
+    r1, g1, b1 = int(a[0:2], 16), int(a[2:4], 16), int(a[4:6], 16)
+    r2, g2, b2 = int(b[0:2], 16), int(b[2:4], 16), int(b[4:6], 16)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    bb = round(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{bb:02x}"
+
+def _gradient_hex(stops: list, t: float) -> str:
+    """Pick a color along a multi-stop gradient. stops = ['#..','#..',…]."""
+    if len(stops) == 1:
+        return stops[0]
+    t = max(0.0, min(1.0, t))
+    seg = t * (len(stops) - 1)
+    i = min(int(seg), len(stops) - 2)
+    frac = seg - i
+    return _lerp_hex(stops[i], stops[i + 1], frac)
+
+def _hex_to_ansi_gradient(stops: list, t: float) -> str:
+    """Return the ANSI code for position t along a hex gradient."""
+    return _hex_to_ansi(_gradient_hex(stops, t))
+
+def _hex_to_ansi(hex_color: str) -> str:
+    """Dispatch a hex color to the right conversion for the active mode."""
+    if _COLOR_MODE == "truecolor":
+        return _hex_to_ansi_true(hex_color)
+    if _COLOR_MODE == "256":
+        return _hex_to_ansi256(hex_color)
+    return _hex_to_ansi16(hex_color)
 
 class Palette:
     """Theme-aware color palette with automatic capability detection."""
@@ -271,6 +370,31 @@ class Palette:
         return cls._theme
 
     @classmethod
+    def themes(cls) -> list:
+        return sorted(_THEMES.keys())
+
+    @classmethod
+    def gradient_tok(cls, token: str, t: float) -> str:
+        """ANSI code for a token blended toward 'accent' by factor t (0..1)."""
+        if _COLOR_MODE == "off":
+            return ""
+        base = cls.tokens().get(token, "#c9d1d9")
+        accent = cls.tokens().get("accent", base)
+        return _hex_to_ansi(_lerp_hex(base, accent, t))
+
+    @classmethod
+    def gradient_stops(cls, tokens: list) -> list:
+        """Return the hex values for a list of token names (for multi-stop gradients)."""
+        return [cls.tokens().get(t, "#c9d1d9") for t in tokens]
+
+    @classmethod
+    def gradient_at(cls, stops_hex: list, t: float) -> str:
+        """ANSI code at position t along a custom hex gradient."""
+        if _COLOR_MODE == "off":
+            return ""
+        return _hex_to_ansi(_gradient_hex(stops_hex, t))
+
+    @classmethod
     def tokens(cls) -> dict:
         return _THEMES.get(cls._theme, _THEMES["dark"])
 
@@ -283,12 +407,7 @@ class Palette:
         if key in cls._cache:
             return cls._cache[key]
         hex_color = cls.tokens().get(token, "#c9d1d9")
-        if _COLOR_MODE == "truecolor":
-            code = _hex_to_ansi_true(hex_color)
-        elif _COLOR_MODE == "256":
-            code = _hex_to_ansi256(hex_color)
-        else:
-            code = _hex_to_ansi16(hex_color)
+        code = _hex_to_ansi(hex_color)
         cls._cache[key] = code
         return code
 
@@ -1081,8 +1200,8 @@ class TUI:
             print(s(f"    {icon} {desc}", Style.BRIGHT_CYAN))
         print()
     @staticmethod
-    def status_bar(session, budget=None):
-        """Single-line status bar (replaces the old 3-line box)."""
+    def status_bar(session, budget=None, elapsed=None):
+        """Single-line status bar with gradient progress."""
         mode_tokens = {"plan": "accent", "default": "warn", "acceptEdits": "ok",
                        "yolo": "err", "dontAsk": "dim"}
         mc = Palette.tok(mode_tokens.get(session.perm_mode, "fg"))
@@ -1099,12 +1218,20 @@ class TUI:
         if session.todos:
             done = sum(1 for t in session.todos if isinstance(t, dict) and t.get("status") == "done")
             parts.append(s(f"📋{done}/{len(session.todos)}", Palette.tok("dec")))
+        if elapsed is not None:
+            m, sec = divmod(int(elapsed), 60)
+            parts.append(s(f"⏱{m}:{sec:02d}", Palette.tok("dim")))
         if budget is not None:
             pct = min(100, int(budget.used_tokens * 100 / max(1, budget.max_tokens)))
-            bar_w = 8
+            bar_w = 10
             filled = round(bar_w * pct / 100)
-            bar_color = Palette.tok("ok") if pct < 60 else Palette.tok("warn") if pct < 85 else Palette.tok("err")
-            bar = s("█" * filled, bar_color) + s("░" * (bar_w - filled), Palette.tok("dim"))
+            # gradient green → yellow → red across the filled portion
+            stops = Palette.gradient_stops(["ok", "warn", "err"])
+            cells = []
+            for i in range(filled):
+                cell_t = (i + 1) / max(1, filled)
+                cells.append(s("█", Palette.gradient_at(stops, cell_t)))
+            bar = "".join(cells) + s("░" * (bar_w - filled), Palette.tok("dim"))
             parts.append(f"{bar} {pct}%")
         body = "  ".join(parts)
         # clip if too wide
@@ -4534,17 +4661,32 @@ class CLI:
     def _theme_cmd(self, rest):
         """Switch color theme."""
         rest = rest.strip().lower()
-        if rest in ("dark", "light"):
+        if rest in Palette.themes():
             Palette.set_theme(rest)
             self.config["theme"] = rest
             save_json(CONFIG_FILE, self.config)
             TUI.ok(f"主题已切换到 {rest}")
         elif rest == "list":
-            TUI.kv([("当前", Palette.get_theme()), ("可用", "dark, light")])
+            print()
+            for tn in Palette.themes():
+                marker = " ●" if tn == Palette.get_theme() else "  "
+                sample = s("████ ", Palette.tok("accent")) + s("████ ", Palette.tok("ok")) + \
+                         s("████ ", Palette.tok("warn")) + s("████", Palette.tok("err"))
+                # temporarily switch to show each theme's colors
+                saved = Palette.get_theme()
+                Palette.set_theme(tn)
+                sample = s("████ ", Palette.tok("accent")) + s("████ ", Palette.tok("ok")) + \
+                         s("████ ", Palette.tok("warn")) + s("████", Palette.tok("err"))
+                Palette.set_theme(saved)
+                cur = " (当前)" if tn == Palette.get_theme() else ""
+                print(f"  {s(marker, Palette.tok('accent'))} {tn:<12s} {sample}{cur}")
+            print()
+            TUI.dim(f"用法: /theme <{'|'.join(Palette.themes())}>")
         else:
             TUI.kv([("当前主题", Palette.get_theme()),
                     ("颜色模式", Palette.mode()),
-                    ("用法", "/theme dark|light|list")])
+                    ("可用", ", ".join(Palette.themes())),
+                    ("用法", "/theme <名称>|list")])
 
     def _config_cmd(self, rest):
         """View or set config values."""
@@ -5213,6 +5355,29 @@ def run_selftest() -> int:
         check("hex_to_ansi16 returns ANSI str", isinstance(code16, str) and "\x1b[" in code16, repr(code16))
         code_true = _hex_to_ansi_true("#ff0000")
         check("hex_to_ansi_true returns ANSI str", isinstance(code_true, str) and "\x1b[38;2;" in code_true, repr(code_true))
+        # all themes registered and produce distinct err tokens
+        theme_names = Palette.themes()
+        check("8 themes registered", len(theme_names) >= 8, str(theme_names))
+        err_codes = set()
+        for tn in theme_names:
+            Palette.set_theme(tn)
+            err_codes.add(Palette.tok("err"))
+        check("themes produce distinct err colors", len(err_codes) >= 6, f"{len(err_codes)} distinct")
+        Palette.set_theme("dark")
+        # gradient helpers
+        g0 = Palette.gradient_tok("err", 0.0)
+        g1 = Palette.gradient_tok("err", 1.0)
+        check("gradient_tok returns ANSI at both ends",
+              "\x1b[" in g0 and "\x1b[" in g1, f"g0={g0!r} g1={g1!r}")
+        stops = Palette.gradient_stops(["ok", "warn", "err"])
+        check("gradient_stops returns 3 hex", len(stops) == 3 and all(h.startswith("#") for h in stops), str(stops))
+        gm = Palette.gradient_at(stops, 0.5)
+        check("gradient_at mid returns ANSI", "\x1b[" in gm, repr(gm))
+        # _lerp_hex / _gradient_hex
+        check("lerp_hex midpoint", _lerp_hex("#000000", "#ffffff", 0.5) == "#808080",
+              _lerp_hex("#000000", "#ffffff", 0.5))
+        check("gradient_hex single stop", _gradient_hex(["#ff0000"], 0.5) == "#ff0000",
+              _gradient_hex(["#ff0000"], 0.5))
     finally:
         Style._disabled = _had_disabled
         _COLOR_MODE = _saved_color_mode
@@ -5320,7 +5485,7 @@ def main():
     parser.add_argument("--no-stream", action="store_true", help="disable streaming")
     parser.add_argument("--json", action="store_true", help="NDJSON/plain JSON output for one-shot")
     parser.add_argument("--no-plan-confirm", action="store_true", help="skip plan-mode confirmation")
-    parser.add_argument("--theme", choices=["dark", "light"], default=None, help="color theme")
+    parser.add_argument("--theme", choices=Palette.themes(), default=None, help="color theme")
     parser.add_argument("--no-think", action="store_true", help="hide reasoning/thinking content")
     parser.add_argument("--version", action="version", version=f"engineer {__version__}")
     parser.add_argument("--health", action="store_true", help="API health check and exit")
