@@ -1364,6 +1364,352 @@ def spinner(msg="Working"):
 
 
 # ═══════════════════════════════════════════════════════════
+# LINE EDITOR (raw-mode input with history / completion / palette)
+# ═══════════════════════════════════════════════════════════
+
+class LineEditor:
+    """Raw-mode single-line editor with history, Tab completion and Ctrl+P palette.
+
+    Falls back to plain input() on non-TTY.  The buffer is a list of chars with
+    a cursor index; rendering rewrites the line each keystroke.  History is
+    persisted to ~/.nvidia_engineer_pro/history.txt.
+    """
+    MAX_HISTORY = 500
+
+    def __init__(self, prompt="  ⌨ ", completer=None, history_path=None,
+                 commands=None):
+        self.prompt = prompt
+        self.completer = completer          # fn(text) -> list[str]
+        self.commands = commands or []      # for Ctrl+P palette
+        self.history_path = history_path or (APP_DIR / "history.txt")
+        self.history = self._load_history()
+
+    # ── history ──────────────────────────────────────────
+    def _load_history(self) -> list:
+        try:
+            if self.history_path.exists():
+                return [l.rstrip("\n") for l in self.history_path.read_text(
+                    encoding="utf-8", errors="replace").splitlines() if l.strip()]
+        except Exception:
+            pass
+        return []
+
+    def _save_history(self):
+        try:
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            self.history_path.write_text(
+                "\n".join(self.history[-self.MAX_HISTORY:]) + "\n",
+                encoding="utf-8")
+        except Exception:
+            pass
+
+    def _add_history(self, text: str):
+        text = text.strip()
+        if text and (not self.history or self.history[-1] != text):
+            self.history.append(text)
+            if len(self.history) > self.MAX_HISTORY:
+                self.history = self.history[-self.MAX_HISTORY:]
+            self._save_history()
+
+    # ── rendering ────────────────────────────────────────
+    def _render(self, buf: list, cursor: int, search_mode=False, search_term="",
+                search_matches=None, search_idx=0):
+        text = "".join(buf)
+        term_w = max(20, shutil.get_terminal_size((80, 24)).columns)
+        prompt_w = disp_width(self.prompt)
+        avail = max(10, term_w - prompt_w - 2)
+        if search_mode:
+            hdr = f"  ↩ {search_term}" if search_term else "  ↩ 反向搜索: "
+            line = hdr
+            if search_matches is not None and search_matches:
+                idx = min(search_idx, len(search_matches) - 1)
+                line += f"  [{idx+1}/{len(search_matches)}]  {search_matches[idx][:avail-20]}"
+            out = "\r" + s(line, Palette.tok("accent")) + "\x1b[K"
+            sys.stdout.write(out)
+            sys.stdout.flush()
+            return
+        # colorize slash commands in the buffer for display
+        if Style._disabled or not text.startswith("/"):
+            disp = text[:avail]
+        else:
+            parts = text.split(" ", 1)
+            disp = s(parts[0], Palette.tok("accent"), Style.BOLD)
+            if len(parts) > 1:
+                disp += " " + parts[1][:avail - disp_width(parts[0]) - 1]
+        out = "\r" + self.prompt + disp + "\x1b[K"
+        # position cursor: move to column prompt_w + display-width of buf[:cursor]
+        col = prompt_w + disp_width(text[:cursor]) + 1
+        out += f"\x1b[{col}G"
+        sys.stdout.write(out)
+        sys.stdout.flush()
+
+    # ── escape sequence reader ───────────────────────────
+    @staticmethod
+    def _read_escape() -> str:
+        """Read the remainder of an escape sequence after ESC."""
+        import select as _sel
+        ch = sys.stdin.read(1)
+        if ch != "[" and ch != "O":
+            return ch
+        seq = ch
+        while True:
+            r, _, _ = _sel.select([sys.stdin], [], [], 0.05)
+            if not r:
+                break
+            c = sys.stdin.read(1)
+            seq += c
+            if c.isalpha() or c == "~":
+                break
+        return seq
+
+    # ── command palette ──────────────────────────────────
+    def _palette(self) -> str:
+        """Ctrl+P fuzzy command palette.  Returns selected command or ''."""
+        query = ""
+        idx = 0
+        cmds = self.commands
+        while True:
+            matches = _fuzzy_filter(query, cmds) if query else cmds
+            if matches:
+                idx = max(0, min(idx, len(matches) - 1))
+            # render palette overlay
+            lines = []
+            lines.append("\r\x1b[J")  # clear from cursor down
+            lines.append(s("  ┌─ 命令面板 ─ Ctrl+P ─ Esc 取消 ─┐\n", Palette.tok("border")))
+            if not matches:
+                lines.append(s("  │ (无匹配)\n", Palette.tok("dim")))
+            for i, m in enumerate(matches[:12]):
+                marker = " ▸ " if i == idx else "   "
+                col = Palette.tok("accent") if i == idx else Palette.tok("fg")
+                lines.append(s("│", Palette.tok("border")) + s(marker, col)
+                             + s(m, col, Style.BOLD if i == idx else "") + "\n")
+            lines.append(s("  └" + "─" * 34 + "┘\n", Palette.tok("border")))
+            lines.append(s(f"  搜索: {query}", Palette.tok("dim")))
+            sys.stdout.write("".join(lines))
+            sys.stdout.flush()
+            ch = sys.stdin.read(1)
+            if not ch:
+                return ""
+            if ch == "\x1b":  # Esc
+                seq = self._read_escape()
+                if seq in ("[A",):    idx = max(0, idx - 1); continue
+                if seq in ("[B",):    idx = min(len(matches) - 1, idx + 1); continue
+                sys.stdout.write("\r\x1b[J"); sys.stdout.flush()
+                return ""
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\r\x1b[J"); sys.stdout.flush()
+                return matches[idx] if matches else ""
+            if ch == "\x10":  # Ctrl+P again → cycle
+                idx = (idx + 1) % max(1, len(matches)); continue
+            if ch == "\x7f" or ch == "\x08":
+                query = query[:-1]; idx = 0; continue
+            if ch.isprintable():
+                query += ch; idx = 0; continue
+
+    # ── Ctrl+R reverse history search ────────────────────
+    def _reverse_search(self, buf: list, cursor: int):
+        """Interactive Ctrl+R.  Returns (new_buf, new_cursor) or the original."""
+        term = ""
+        matches = []
+        idx = 0
+        while True:
+            if term:
+                matches = [h for h in reversed(self.history) if term in h]
+            else:
+                matches = []
+            self._render(buf, cursor, search_mode=True, search_term=term,
+                         search_matches=matches, search_idx=idx)
+            ch = sys.stdin.read(1)
+            if not ch:
+                break
+            if ch == "\x12":  # Ctrl+R again → previous match
+                if matches:
+                    idx = (idx + 1) % len(matches)
+                continue
+            if ch in ("\r", "\n"):
+                if matches:
+                    sel = matches[min(idx, len(matches) - 1)]
+                    sys.stdout.write("\r\x1b[J"); sys.stdout.flush()
+                    return list(sel), len(sel)
+                break
+            if ch == "\x1b":
+                seq = self._read_escape()
+                if seq in ("[A",):  # up
+                    if matches: idx = (idx + 1) % len(matches)
+                    continue
+                if seq in ("[B",):  # down
+                    if matches: idx = (idx - 1) % len(matches)
+                    continue
+                break
+            if ch in ("\x03", "\x07"):  # Ctrl+C / Ctrl+G → cancel
+                break
+            if ch == "\x7f" or ch == "\x08":
+                term = term[:-1]; idx = 0; continue
+            if ch.isprintable():
+                term += ch; idx = 0; continue
+        # cancelled: restore
+        sys.stdout.write("\r\x1b[J"); sys.stdout.flush()
+        return buf, cursor
+
+    # ── main read loop ───────────────────────────────────
+    def read(self) -> str:
+        if not sys.stdin.isatty():
+            return input(self.prompt)
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            return self._edit_raw()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+    def _edit_raw(self) -> str:
+        buf: list = []
+        cursor = 0
+        hist_idx = None          # None = editing live buffer
+        hist_stash = []          # buffer snapshot when hist browsing started
+        self._render(buf, cursor)
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch:
+                sys.stdout.write("\r\n"); sys.stdout.flush()
+                raise EOFError
+            # ── control chars ──
+            if ch == "\r" or ch == "\n":
+                sys.stdout.write("\r\n"); sys.stdout.flush()
+                text = "".join(buf)
+                if text.strip():
+                    self._add_history(text)
+                return text
+            if ch == "\x03":  # Ctrl+C
+                sys.stdout.write("^C\r\n"); sys.stdout.flush()
+                raise KeyboardInterrupt
+            if ch == "\x04":  # Ctrl+D
+                if not buf:
+                    sys.stdout.write("\r\n"); sys.stdout.flush()
+                    raise EOFError
+                if cursor < len(buf):
+                    del buf[cursor]
+                    self._render(buf, cursor)
+                continue
+            if ch == "\x7f" or ch == "\x08":  # Backspace
+                if cursor > 0:
+                    del buf[cursor - 1]
+                    cursor -= 1
+                    if hist_idx is not None:
+                        hist_idx = None
+                    self._render(buf, cursor)
+                continue
+            if ch == "\t":  # Tab completion
+                if self.completer:
+                    text = "".join(buf)
+                    matches = self.completer(text)
+                    if matches:
+                        # common prefix
+                        common = os.path.commonprefix(matches) if len(matches) > 1 else matches[0]
+                        buf = list(common)
+                        cursor = len(buf)
+                        # show matches on next line if ambiguous
+                        if len(matches) > 1:
+                            sys.stdout.write("\r\n")
+                            sys.stdout.write(s("  " + "  ".join(matches[:10]), Palette.tok("dim")) + "\r\n")
+                self._render(buf, cursor)
+                continue
+            if ch == "\x10":  # Ctrl+P → command palette
+                sel = self._palette()
+                if sel:
+                    buf = list(sel)
+                    cursor = len(buf)
+                self._render(buf, cursor)
+                continue
+            if ch == "\x12":  # Ctrl+R → reverse history search
+                buf, cursor = self._reverse_search(buf, cursor)
+                self._render(buf, cursor)
+                continue
+            if ch == "\x15":  # Ctrl+U → clear line
+                buf = []; cursor = 0; hist_idx = None
+                self._render(buf, cursor)
+                continue
+            if ch == "\x01":  # Ctrl+A → home
+                cursor = 0; self._render(buf, cursor); continue
+            if ch == "\x05":  # Ctrl+E → end
+                cursor = len(buf); self._render(buf, cursor); continue
+            if ch == "\x0c":  # Ctrl+L → clear screen
+                sys.stdout.write("\x1b[2J\x1b[H"); sys.stdout.flush()
+                self._render(buf, cursor)
+                continue
+            # ── escape sequences ──
+            if ch == "\x1b":
+                seq = self._read_escape()
+                if seq in ("[D",):     # Left
+                    if cursor > 0: cursor -= 1
+                elif seq in ("[C",):   # Right
+                    if cursor < len(buf): cursor += 1
+                elif seq in ("[H", "O", "[1~", "[7~"):  # Home
+                    cursor = 0
+                elif seq in ("[F", "[4~", "[8~"):       # End
+                    cursor = len(buf)
+                elif seq in ("[3~",):  # Delete
+                    if cursor < len(buf):
+                        del buf[cursor]
+                        if hist_idx is not None: hist_idx = None
+                elif seq in ("[A",):   # Up → history
+                    if self.history:
+                        if hist_idx is None:
+                            hist_stash = buf[:]
+                            hist_idx = len(self.history) - 1
+                        elif hist_idx > 0:
+                            hist_idx -= 1
+                        buf = list(self.history[hist_idx])
+                        cursor = len(buf)
+                elif seq in ("[B",):   # Down → history
+                    if hist_idx is not None:
+                        if hist_idx < len(self.history) - 1:
+                            hist_idx += 1
+                            buf = list(self.history[hist_idx])
+                        else:
+                            hist_idx = None
+                            buf = hist_stash[:]
+                        cursor = len(buf)
+                self._render(buf, cursor)
+                continue
+            # ── printable ──
+            if ch.isprintable():
+                buf.insert(cursor, ch)
+                cursor += len(ch)
+                if hist_idx is not None:
+                    hist_idx = None
+                self._render(buf, cursor)
+                continue
+            # ignore other control chars
+
+
+def _fuzzy_filter(query: str, items: list) -> list:
+    """Simple subsequence fuzzy match, ranked by consecutive-run bonus."""
+    q = query.lower()
+    if not q:
+        return items
+    scored = []
+    for it in items:
+        s_l = it.lower()
+        i = 0
+        score = 0
+        consecutive = 0
+        for ch in q:
+            j = s_l.find(ch, i)
+            if j == -1:
+                break
+            consecutive = consecutive + 1 if j == i else 0
+            score += 1 + consecutive * 2
+            i = j + 1
+        else:
+            scored.append((score, it))
+    scored.sort(key=lambda x: -x[0])
+    return [it for _, it in scored]
+
+
+# ═══════════════════════════════════════════════════════════
 # PERMISSION SYSTEM
 # ═══════════════════════════════════════════════════════════
 
@@ -4316,6 +4662,13 @@ HELP_TEXT = f"""
 {s('─'*58, Style.CYAN)}
 """
 
+SLASH_COMMANDS = ["/help", "/model", "/models", "/mode", "/perm", "/risk", "/budget",
+                  "/todos", "/done", "/memory", "/skills", "/hook", "/tools", "/cp",
+                  "/undo", "/verify", "/web", "/search", "/proj", "/tree", "/sym",
+                  "/find", "/grep", "/stat", "/diff", "/branch", "/export", "/clear",
+                  "/compact", "/session", "/cost", "/health", "/quit", "/exit",
+                  "/last", "/theme", "/config", "/copy", "/revert"]
+
 
 class CLI:
     def __init__(self, args):
@@ -4341,12 +4694,6 @@ class CLI:
         """Tab-complete slash commands (only when a readline module is present)."""
         if readline is None or not sys.stdin.isatty():
             return
-        SLASH_COMMANDS = ["/help", "/model", "/models", "/mode", "/perm", "/risk", "/budget",
-                          "/todos", "/done", "/memory", "/skills", "/hook", "/tools", "/cp",
-                          "/undo", "/verify", "/web", "/search", "/proj", "/tree", "/sym",
-                          "/find", "/grep", "/stat", "/diff", "/branch", "/export", "/clear",
-                          "/compact", "/session", "/cost", "/health", "/quit", "/exit",
-                          "/last", "/theme", "/config", "/copy", "/revert"]
 
         def completer(text, state):
             if not text.startswith("/"):
@@ -4404,7 +4751,7 @@ class CLI:
             ("预算", agent.budget.status()),
         ])
         print()
-        TUI.dim("输入 /help 查看命令；直接输入文字开始对话；Tab 补全斜杠命令")
+        TUI.dim("↑↓历史  Tab补全  Ctrl+R搜索  Ctrl+P命令面板  Ctrl+L清屏  Ctrl+C取消/退出")
         # snapshot on start — off the critical path so the first prompt is instant
         def _startup_snapshot():
             try:
@@ -4413,12 +4760,24 @@ class CLI:
             except Exception:
                 pass
         threading.Thread(target=_startup_snapshot, daemon=True).start()
+
+        def _completer(text):
+            if not text.startswith("/"):
+                return []
+            return [c for c in SLASH_COMMANDS if c.startswith(text)]
+
+        editor = LineEditor(
+            prompt=s("  ⌨ ", Palette.tok("prompt"), Style.BOLD),
+            completer=_completer,
+            commands=SLASH_COMMANDS,
+        )
         buffer = []
         last_intr = 0.0
         while True:
             try:
-                prompt = "  ⌨ " if not buffer else "  … "
-                line = input(s(prompt, Style.BRIGHT_BLUE + Style.BOLD))
+                prompt = editor.prompt if not buffer else s("  … ", Palette.tok("dim"))
+                editor.prompt = prompt
+                line = editor.read()
             except EOFError:
                 print()
                 break
@@ -5492,6 +5851,37 @@ def run_selftest() -> int:
     sm3.feed("line1\nincompl")
     tail = sm3.flush()
     check("StreamMarkdown flush preserves incomplete line", "incompl" in tail, repr(tail))
+
+    # ── v8.1: LineEditor & fuzzy filter ─────────────────
+    TUI.section("8.1 · LineEditor & fuzzy")
+    check("fuzzy_filter exact prefix ranks first",
+          _fuzzy_filter("/th", ["/theme", "/help", "/todos"])[0] == "/theme",
+          str(_fuzzy_filter("/th", ["/theme", "/help", "/todos"])))
+    check("fuzzy_filter subsequence matches",
+          "/config" in _fuzzy_filter("cfg", ["/config", "/clear", "/copy"]),
+          str(_fuzzy_filter("cfg", ["/config", "/clear", "/copy"])))
+    check("fuzzy_filter empty query returns all",
+          _fuzzy_filter("", ["a", "b", "c"]) == ["a", "b", "c"], "")
+    check("fuzzy_filter no match returns empty",
+          _fuzzy_filter("zzz", ["/help", "/model"]) == [], "")
+    # history persistence
+    with tempfile.TemporaryDirectory() as _td:
+        _hp = Path(_td) / "hist.txt"
+        _le = LineEditor(history_path=_hp)
+        _le._add_history("hello world")
+        _le._add_history("second line")
+        _le2 = LineEditor(history_path=_hp)
+        check("LineEditor history persists", _le2.history == ["hello world", "second line"],
+              str(_le2.history))
+        _le2._add_history("second line")  # duplicate ignored
+        check("LineEditor dedupes consecutive history", len(_le2.history) == 2,
+              str(_le2.history))
+    # non-TTY fallback
+    _le3 = LineEditor(history_path=Path("/dev/null"))
+    check("LineEditor loads without crash", isinstance(_le3.history, list), "")
+    # fuzzy filter with CJK
+    check("fuzzy_filter CJK", _fuzzy_filter("主题", ["/theme 主题", "/help"])[0] == "/theme 主题",
+          str(_fuzzy_filter("主题", ["/theme 主题", "/help"])))
 
     # ── v8: CJK/emoji width safety ──────────────────────
     TUI.section("8 · CJK/emoji width safety")
