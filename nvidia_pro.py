@@ -24,7 +24,7 @@ try:
 except ImportError:
     readline = None
 
-__version__ = "8.1.2"
+__version__ = "8.1.3"
 APP_DIR = Path.home() / ".nvidia_engineer_pro"
 SESSIONS_DIR = APP_DIR / "sessions"
 CHECKPOINTS_DIR = APP_DIR / "checkpoints"
@@ -148,9 +148,11 @@ def block_private_host(url: str) -> None:
     if PRIVATE_HOST_RE.match(host) or host.endswith(".local") or host.endswith(".internal"):
         raise ToolError(f"blocked: private/localhost URL host={host}")
     try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return  # let the request layer surface the resolution error
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+            infos = _ex.submit(socket.getaddrinfo, host, None).result(timeout=8)
+    except Exception:
+        return  # DNS slow/broken: let the request layer surface the error (it has timeouts)
     for info in infos:
         ip = info[4][0].split("%")[0]
         if PRIVATE_HOST_RE.match(ip) or ip.startswith(("127.", "10.", "192.168.", "169.254.")):
@@ -1496,8 +1498,15 @@ class LineEditor:
     # ── escape sequence reader ───────────────────────────
     @staticmethod
     def _read_escape() -> str:
-        """Read the remainder of an escape sequence after ESC."""
+        """Read the remainder of an escape sequence after ESC (non-blocking).
+
+        Returns "" for a lone Esc press (no bytes follow within ~80ms)
+        instead of hanging forever on a blocking read.
+        """
         import select as _sel
+        r, _, _ = _sel.select([sys.stdin], [], [], 0.08)
+        if not r:
+            return ""
         ch = sys.stdin.read(1)
         if ch != "[" and ch != "O":
             return ch
@@ -1852,10 +1861,10 @@ class Pager:
                 elif seq in ("[H", "O", "[1~"): scroll = 0
                 elif seq in ("[F", "[4~"): scroll = max_scroll
                 elif seq == "":
-                    pass
+                    return  # lone Esc quits
                 self._draw(scroll, view_h, term_w, search_term, search_pos)
                 continue
-            if ch in ("q", "\x03", "\x1b"):  # q / Ctrl+C / Esc
+            if ch in ("q", "\x03"):  # q / Ctrl+C quit (Esc handled above)
                 return
             if ch in ("j",):    scroll = min(max_scroll, scroll + 1)
             elif ch in ("k",):  scroll = max(0, scroll - 1)
@@ -2211,7 +2220,19 @@ class PermissionManager:
                 if risk == RiskLevel.SAFE: return Decision.ALLOW, "低风险", risk
                 return Decision.ASK, f"风险={risk.value}", risk
             if tool == "delete_file":
-                if path_in_workdir(str(args.get("path","")), self.workdir): return Decision.ASK, "删除", risk
+                raw = str(args.get("path",""))
+                try:
+                    _dp = Path(raw).expanduser()
+                    if not _dp.is_absolute(): _dp = Path(self.workdir) / _dp
+                    # unlink() never follows the final symlink: judge a symlink
+                    # by its own location, not by where it points.
+                    if _dp.is_symlink():
+                        if path_in_workdir(str(_dp.parent), self.workdir):
+                            return Decision.ASK, "删除", risk
+                        return Decision.DENY, "区外删除", risk
+                except Exception:
+                    pass
+                if path_in_workdir(raw, self.workdir): return Decision.ASK, "删除", risk
                 return Decision.DENY, "区外删除", risk
             if tool == "git_commit": return Decision.ALLOW, "本地提交(可 git_undo)", RiskLevel.DANGEROUS
             if tool == "checkpoint":
@@ -2408,10 +2429,13 @@ class CheckpointManager:
         self._last_auto = 0.0
         self._mutations = 0
         self._lock = threading.RLock()   # snapshots may run on a background thread
-        # init shadow git if needed
+        # init shadow git if needed (git optional: checkpoints degrade gracefully)
         if not (self.git_dir / "HEAD").exists():
-            subprocess.run(["git", "init", "--bare", str(self.git_dir)],
-                          capture_output=True, timeout=10)
+            try:
+                subprocess.run(["git", "init", "--bare", str(self.git_dir)],
+                               capture_output=True, timeout=10)
+            except Exception:
+                pass
         # keep huge/irrelevant dirs out of the shadow index
         exclude = self.git_dir / "info" / "exclude"
         try:
@@ -3280,9 +3304,25 @@ class ToolEngine:
         return [(cid, results.get(cid, "ERROR: missing result")) for cid, _, _ in calls]
 
     # ---------- file tools ----------
+    @staticmethod
+    def _reject_broken(p: Path, label: str):
+        """Raise a clean ToolError if p is a dangling symlink (else return None)."""
+        try:
+            if p.is_symlink() and not p.exists():
+                try:
+                    tgt = os.readlink(p)
+                except OSError:
+                    tgt = "?"
+                raise ToolError(f"broken symlink: {label} -> {tgt}")
+        except ToolError:
+            raise
+        except Exception:
+            pass
+
     def tool_read_file(self, path: str, start_line: int = 1, max_lines: int = 400,
                        offset: int = 0) -> str:
         p = self._resolve(path)
+        self._reject_broken(p, path)
         if not p.exists(): raise ToolError(f"not found: {path}")
         if p.is_dir(): raise ToolError(f"is a directory: {path} (use list_dir)")
         if p.stat().st_size > 2 * 1024 * 1024: raise ToolError(f"file too large: {p.stat().st_size} bytes")
@@ -3299,6 +3339,7 @@ class ToolEngine:
 
     def tool_write_file(self, path: str, content: str, create_backup: bool = True) -> str:
         p = self._resolve(path)
+        self._reject_broken(p, path)
         p.parent.mkdir(parents=True, exist_ok=True)
         existed = p.exists()
         if existed and create_backup:
@@ -3310,6 +3351,7 @@ class ToolEngine:
     def tool_edit_file(self, path: str, old_string: str, new_string: str,
                        replace_all: bool = False) -> str:
         p = self._resolve(path)
+        self._reject_broken(p, path)
         if not p.exists(): raise ToolError(f"not found: {path}")
         text = p.read_text(encoding="utf-8")
         if old_string not in text:
@@ -3352,6 +3394,11 @@ class ToolEngine:
             p = self._resolve(target)
             if p.is_dir():
                 skipped.append(f"{target}: is a directory")
+                continue
+            try:
+                self._reject_broken(p, target)
+            except ToolError as e:
+                skipped.append(str(e))
                 continue
             old_text, new_text, ok = self._apply_hunks(sec, p)
             if not ok:
@@ -3434,8 +3481,7 @@ class ToolEngine:
 
     def tool_file_stat(self, path: str) -> str:
         p = self._resolve(path)
-        if p.is_symlink() and not p.exists():
-            raise ToolError(f"broken symlink: {path} -> {os.readlink(p)}")
+        self._reject_broken(p, path)
         if not p.exists(): raise ToolError(f"not found: {path}")
         st = p.stat()
         kind = "dir" if p.is_dir() else "file" if p.is_file() else "other"
@@ -3465,6 +3511,9 @@ class ToolEngine:
 
     def tool_delete_file(self, path: str) -> str:
         p = self._resolve(path)
+        if p.is_symlink() and not p.exists():
+            p.unlink()
+            return f"Deleted broken symlink {path}"
         if not p.exists(): raise ToolError(f"not found: {path}")
         if p.is_dir():
             shutil.rmtree(p)
@@ -3637,7 +3686,7 @@ class ToolEngine:
         except Exception as e:
             return str(e), 1
 
-    def tool_git_status(self):
+    def tool_git_status(self) -> str:
         out, _ = self._git("status", "--short", "--branch")
         return out or "(not a git repo or clean)"
 
@@ -3654,7 +3703,7 @@ class ToolEngine:
         out, _ = self._git("log", f"-{int(count)}", "--oneline", "--decorate")
         return out or "(no commits)"
 
-    def tool_git_init(self):
+    def tool_git_init(self) -> str:
         out, rc = self._git("init")
         return out or "git initialized"
 
@@ -4206,7 +4255,7 @@ class ToolEngine:
                         result = self._subagent_readonly(fn.get("name", ""), fa)
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": _clip(result, 3000)})
                     continue
-                final_text.append(msg.get("content") or "")
+                final_text.append(msg.get("content") or msg.get("reasoning_content") or "")
                 break
             # clear the progress line
             sys.stderr.write("\r" + " " * 40 + "\r")
@@ -4386,7 +4435,12 @@ class Session:
         if not SESSIONS_DIR.exists():
             return []
         out = []
-        for p in sorted(SESSIONS_DIR.glob("sess_*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        def _mtime(p):
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+        for p in sorted(SESSIONS_DIR.glob("sess_*.json"), key=_mtime, reverse=True):
             try:
                 out.append(cls.load(p))
             except Exception:
@@ -4715,7 +4769,7 @@ class Agent:
                         resp = self.client.chat(messages, tools=self.schemas)
                     last_usage = resp.get("usage")
                     msg = resp["choices"][0]["message"]
-                    assistant_text = msg.get("content") or ""
+                    assistant_text = msg.get("content") or msg.get("reasoning_content") or ""
                     if assistant_text and self.echo:
                         print(md(assistant_text))
                     if msg.get("tool_calls"):
@@ -4741,6 +4795,16 @@ class Agent:
                         TUI.warn("⏹ 已中断")
                 self.session.save()
                 return assistant_text or "(interrupted)"
+            except Exception as e:
+                # never leak a traceback: malformed responses, JSON errors, I/O, ...
+                log_audit("agent_error", {"error": f"{type(e).__name__}: {str(e)[:200]}"})
+                if self.echo:
+                    TUI.error(f"内部错误: {type(e).__name__}: {e}（会话已保存）")
+                try:
+                    self.session.save()
+                except Exception:
+                    pass
+                return f"ERROR: {type(e).__name__}: {e}"
 
             # account usage
             self._account(last_usage)
@@ -5092,6 +5156,12 @@ class CLI:
             TUI.warn("⏹ 已中断（会话已保存）")
         except APIError as e:
             TUI.error(f"API: {e}")
+        except Exception as e:
+            TUI.error(f"内部错误 {type(e).__name__}: {e}（会话已保存）")
+            try:
+                self.session.save()
+            except Exception:
+                pass
         TUI.status_bar(self.session, agent.budget, elapsed=time.monotonic() - _t0)
 
     # ---------- commands ----------
@@ -5857,7 +5927,39 @@ def run_selftest() -> int:
         check("tree handles broken symlink", "broken" in out, out[:120])
         out = eng.execute("analyze_project", {"path": "."})
         check("analyze_project handles broken symlink", isinstance(out, str), str(out)[:80])
-        os.unlink(td / "broken_link")
+        # write/edit/read/stat must return clean ToolError, never raw traceback
+        out = eng.execute("write_file", {"path": "broken_link", "content": "x"})
+        check("write_file rejects broken symlink cleanly",
+              str(out).startswith("ERROR") and "broken symlink" in str(out) and "Traceback" not in str(out), str(out)[:120])
+        out = eng.execute("edit_file", {"path": "broken_link", "old_string": "a", "new_string": "b"})
+        check("edit_file rejects broken symlink cleanly",
+              str(out).startswith("ERROR") and "broken symlink" in str(out), str(out)[:120])
+        out = eng.execute("read_file", {"path": "broken_link"})
+        check("read_file rejects broken symlink cleanly",
+              str(out).startswith("ERROR") and "broken symlink" in str(out), str(out)[:120])
+        out = eng.execute("file_stat", {"path": "broken_link"})
+        check("file_stat rejects broken symlink cleanly",
+              str(out).startswith("ERROR") and "broken symlink" in str(out), str(out)[:120])
+        out = eng.execute("apply_patch", {"patch": "diff --git a/broken_link b/broken_link\n--- a/broken_link\n+++ b/broken_link\n@@ -0,0 +1 @@\n+x\n"})
+        check("apply_patch skips broken symlink without traceback",
+              isinstance(out, str) and "Traceback" not in str(out), str(out)[:120])
+        out = eng.execute("delete_file", {"path": "broken_link"})
+        check("delete_file removes broken symlink",
+              "Deleted broken symlink" in str(out) and not (td / "broken_link").exists()
+              and not (td / "broken_link").is_symlink(), str(out)[:120])
+
+        # lone Esc must not hang _read_escape (pipe with no data, writer open)
+        _r, _w = os.pipe()
+        _old_stdin = sys.stdin
+        try:
+            sys.stdin = os.fdopen(_r, "r")
+            _t0 = time.time()
+            _seq = LineEditor._read_escape()
+            _dt = time.time() - _t0
+            check("lone Esc returns immediately", _seq == "" and _dt < 2.0, f"{_seq!r} {_dt:.2f}s")
+        finally:
+            sys.stdin = _old_stdin
+            os.close(_w)
 
         out = eng.execute("glob", {"pattern": "*.txt"})
         check("glob", "a.txt" in out, out[:120])

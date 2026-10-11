@@ -1,4 +1,4 @@
-# NVIDIA ENGINEER PRO v8.1.2
+# NVIDIA ENGINEER PRO v8.1.3
 
 Terminal AI coding agent · **one stdlib-only Python file**, works with any
 NVIDIA NIM / OpenAI-compatible endpoint · 46 tools, streaming, parallel reads,
