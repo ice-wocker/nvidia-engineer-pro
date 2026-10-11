@@ -24,7 +24,7 @@ try:
 except ImportError:
     readline = None
 
-__version__ = "8.1.1"
+__version__ = "8.1.2"
 APP_DIR = Path.home() / ".nvidia_engineer_pro"
 SESSIONS_DIR = APP_DIR / "sessions"
 CHECKPOINTS_DIR = APP_DIR / "checkpoints"
@@ -36,6 +36,18 @@ CONFIG_FILE = APP_DIR / "config.json"
 API_KEY = os.environ.get("NVIDIA_API_KEY", "")
 BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 DEFAULT_MODEL = os.environ.get("NVIDIA_MODEL", "openai/gpt-oss-20b")
+
+# Verified-working chat models on integrate.api.nvidia.com (2026-01).
+# Models that 404, 5xx, time out, or return empty are excluded.
+USABLE_MODELS = [
+    "openai/gpt-oss-20b",
+    "z-ai/glm-5.3-flash",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "meta/muse-glimmer-30b",
+    "meta/llama-3.2-11b-vision-instruct",
+    "poolside/laguna-xs-2.1",
+]
 
 MAX_AGENT_STEPS = 60
 MAX_TOOL_OUTPUT = 4000
@@ -4878,7 +4890,7 @@ HELP_TEXT = f"""
 {s('─'*58, Style.CYAN)}
  {s('/help', Style.BRIGHT_YELLOW)}         显示此帮助
  {s('/model', Style.BRIGHT_YELLOW)} [id]    查看/切换模型
- {s('/models', Style.BRIGHT_YELLOW)}        列出可用模型
+ {s('/models', Style.BRIGHT_YELLOW)} [all]    列出可用模型（all = 全部 API 模型）
  {s('/mode', Style.BRIGHT_YELLOW)} [m]      权限模式 plan|default|acceptEdits|yolo|dontAsk
  {s('/perm', Style.BRIGHT_YELLOW)}          查看权限规则
  {s('/risk', Style.BRIGHT_YELLOW)} <cmd>    分析命令风险等级
@@ -5109,19 +5121,29 @@ class CLI:
                 os.system("clear" if os.name != "nt" else "cls"); TUI.banner(); return True
             elif cmd == "/model":
                 if rest:
+                    if rest not in USABLE_MODELS:
+                        TUI.dim(f"提示: {rest} 不在可用列表中（/models 查看可用模型）")
                     agent.client.model = rest; self.session.model = rest
                     self.session.save(); TUI.ok(f"模型 → {rest}")
                 else:
                     TUI.kv([("当前模型", agent.client.model)]); return True
             elif cmd == "/models":
-                with spinner("获取模型"):
-                    try:
-                        models = agent.client.list_models()
-                    except Exception as e:
-                        TUI.error(str(e)); return True
-                for m in models[:60]:
-                    print(s(f"    {m}", Style.BRIGHT_CYAN if m == agent.client.model else Style.GRAY))
-                TUI.dim(f"共 {len(models)} 个模型")
+                if rest == "all":
+                    with spinner("获取全部模型"):
+                        try:
+                            models = agent.client.list_models()
+                        except Exception as e:
+                            TUI.error(str(e)); return True
+                    for m in models[:80]:
+                        mark = " ●" if m == agent.client.model else "  "
+                        usable = s("✓", Style.GREEN) if m in USABLE_MODELS else s("✗", Style.GRAY)
+                        print(f"  {usable}{s(mark, Style.BRIGHT_CYAN)} {m}")
+                    TUI.dim(f"共 {len(models)} 个（✓ = 可用）")
+                else:
+                    for m in USABLE_MODELS:
+                        mark = s(" ●", Style.BRIGHT_CYAN) if m == agent.client.model else ""
+                        print(s(f"    {m}{mark}", Style.BRIGHT_CYAN if m == agent.client.model else Style.GRAY))
+                    TUI.dim(f"共 {len(USABLE_MODELS)} 个可用模型（/models all 查看全部）")
                 return True
             elif cmd == "/mode":
                 if not rest:
@@ -5680,6 +5702,11 @@ def run_selftest() -> int:
     # 1. schema ↔ implementation consistency
     missing = [n for n in TOOL_SCHEMAS if not hasattr(ToolEngine, f"tool_{n}")]
     check(f"all {len(TOOL_SCHEMAS)} tool schemas have implementations", not missing, str(missing))
+
+    # 1b. usable models list sanity
+    check("USABLE_MODELS is non-empty list", isinstance(USABLE_MODELS, list) and len(USABLE_MODELS) >= 3,
+          str(USABLE_MODELS))
+    check("DEFAULT_MODEL in USABLE_MODELS", DEFAULT_MODEL in USABLE_MODELS, DEFAULT_MODEL)
     extra = [m[5:] for m in dir(ToolEngine) if m.startswith("tool_")
              and m[5:] not in TOOL_SCHEMAS]
     check("no orphan tool methods", not extra, str(extra))
