@@ -1710,6 +1710,177 @@ def _fuzzy_filter(query: str, items: list) -> list:
 
 
 # ═══════════════════════════════════════════════════════════
+# PAGER (scrollable full-screen viewer)
+# ═══════════════════════════════════════════════════════════
+
+class Pager:
+    """Full-screen scrollable viewer for long output, diffs, and files.
+
+    Keys: ↑/↓/j/k scroll, PgUp/PgDn, g/G top/bottom, / search, n next,
+    q/Esc quit.  Falls back to printing the first N lines on non-TTY.
+    """
+
+    def __init__(self, title="", lines=None, line_numbers=False):
+        self.title = title
+        self.lines = lines or []
+        self.line_numbers = line_numbers
+
+    def view(self, max_non_tty=200):
+        """Display the pager.  Returns immediately on non-TTY after printing."""
+        if not sys.stdin.isatty() or not self.lines:
+            for ln in self.lines[:max_non_tty]:
+                print(ln)
+            if len(self.lines) > max_non_tty:
+                TUI.dim(f"… (+{len(self.lines) - max_non_tty} more lines)")
+            return
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        term_h, term_w = shutil.get_terminal_size((80, 24)).lines, \
+                         shutil.get_terminal_size((80, 24)).columns
+        view_h = max(5, term_h - 3)  # header + footer
+        try:
+            tty.setraw(fd)
+            self._loop(view_h, term_w)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            sys.stdout.write("\x1b[2J\x1b[H")  # clear screen on exit
+            sys.stdout.flush()
+
+    def _draw(self, scroll, view_h, term_w, search_term="", search_pos=-1):
+        out = ["\x1b[H\x1b[2J"]  # home + clear
+        # header
+        hdr = f" {self.title} " if self.title else " 查看 "
+        pos = f" {scroll+1}-{min(scroll+view_h, len(self.lines))}/{len(self.lines)} "
+        pad = max(0, term_w - disp_width(hdr) - disp_width(pos) - 4)
+        out.append(s("┌─" + hdr + "─" * pad + pos + "┐\n", Palette.tok("border")))
+        # body
+        for i in range(view_h):
+            idx = scroll + i
+            if idx >= len(self.lines):
+                out.append(s("│" + " " * (term_w - 2) + "│\n", Palette.tok("border")))
+                continue
+            ln = self.lines[idx]
+            # strip ANSI to measure, but keep ANSI for display
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", ln)
+            if self.line_numbers:
+                num = s(f"{idx+1:>4}", Palette.tok("dim")) + s(" │ ", Palette.tok("border"))
+                # clip content
+                content_w = term_w - 2 - 7
+                if disp_width(plain) > content_w:
+                    ln = clip(ln, content_w) + "…"
+                out.append(s("│", Palette.tok("border")) + num + ln + "\n")
+            else:
+                if disp_width(plain) > term_w - 4:
+                    ln = clip(ln, term_w - 4) + "…"
+                out.append(s("│ ", Palette.tok("border")) + ln + "\n")
+        # footer
+        hint = " ↑↓/jk 滚动  PgUp/PgDn  g/G 首/末  / 搜索  n 下一个  q 退出 "
+        if search_term:
+            hint = f" 搜索:{search_term}  n 下一个  q 退出 "
+        fpad = max(0, term_w - disp_width(hint) - 2)
+        out.append(s("└" + hint + "─" * fpad + "┘", Palette.tok("border")))
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+    def _loop(self, view_h, term_w):
+        scroll = 0
+        search_term = ""
+        search_pos = -1
+        max_scroll = max(0, len(self.lines) - view_h)
+        self._draw(scroll, view_h, term_w)
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch:
+                return
+            if ch == "\x1b":
+                seq = LineEditor._read_escape()
+                if seq in ("[A",):    scroll = max(0, scroll - 1)
+                elif seq in ("[B",):  scroll = min(max_scroll, scroll + 1)
+                elif seq in ("[5~",): scroll = max(0, scroll - view_h)   # PgUp
+                elif seq in ("[6~",): scroll = min(max_scroll, scroll + view_h)  # PgDn
+                elif seq in ("[H", "O", "[1~"): scroll = 0
+                elif seq in ("[F", "[4~"): scroll = max_scroll
+                elif seq == "":
+                    pass
+                self._draw(scroll, view_h, term_w, search_term, search_pos)
+                continue
+            if ch in ("q", "\x03", "\x1b"):  # q / Ctrl+C / Esc
+                return
+            if ch in ("j",):    scroll = min(max_scroll, scroll + 1)
+            elif ch in ("k",):  scroll = max(0, scroll - 1)
+            elif ch in ("g",):  scroll = 0
+            elif ch in ("G",):  scroll = max_scroll
+            elif ch == "\x7f" or ch == "\x08":
+                pass
+            elif ch == "/":
+                # mini search prompt
+                term = ""
+                while True:
+                    self._draw(scroll, view_h, term_w, term, search_pos)
+                    c2 = sys.stdin.read(1)
+                    if not c2 or c2 in ("\r", "\n", "\x1b"):
+                        break
+                    if c2 == "\x7f" or c2 == "\x08":
+                        term = term[:-1]; continue
+                    if c2.isprintable():
+                        term += c2
+                search_term = term
+                if search_term:
+                    for i, ln in enumerate(self.lines):
+                        if search_term in re.sub(r"\x1b\[[0-9;]*m", "", ln):
+                            search_pos = i
+                            scroll = max(0, min(i - view_h // 2, max_scroll))
+                            break
+                self._draw(scroll, view_h, term_w, search_term, search_pos)
+                continue
+            elif ch == "n" and search_term:
+                start = (search_pos + 1) if search_pos >= 0 else 0
+                for i in range(start, len(self.lines)):
+                    if search_term in re.sub(r"\x1b\[[0-9;]*m", "", self.lines[i]):
+                        search_pos = i
+                        scroll = max(0, min(i - view_h // 2, max_scroll))
+                        break
+                else:
+                    # wrap
+                    for i in range(0, start):
+                        if search_term in re.sub(r"\x1b\[[0-9;]*m", "", self.lines[i]):
+                            search_pos = i
+                            scroll = max(0, min(i - view_h // 2, max_scroll))
+                            break
+            self._draw(scroll, view_h, term_w, search_term, search_pos)
+
+    # ── static helpers ───────────────────────────────────
+    @staticmethod
+    def view_text(title, text, line_numbers=False, highlight=""):
+        """Convenience: view a raw text blob.  `highlight` = 'diff'|'python'|''."""
+        lines = text.splitlines()
+        if highlight == "diff" and not Style._disabled:
+            lines = hl_diff("\n".join(lines)).splitlines()
+        elif highlight and not Style._disabled:
+            lines = [hl(l, highlight) for l in lines]
+        Pager(title=title, lines=lines, line_numbers=line_numbers).view()
+
+    @staticmethod
+    def view_file(path):
+        """View a file with syntax highlighting and line numbers."""
+        p = Path(path)
+        if not p.exists():
+            TUI.error(f"文件不存在: {path}")
+            return
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            TUI.error(f"读取失败: {e}")
+            return
+        lang = _norm_lang(p.suffix.lstrip("."))
+        lines = text.splitlines()
+        if lang and not Style._disabled:
+            lines = hl(text, lang).splitlines()
+        Pager(title=str(p), lines=lines, line_numbers=True).view()
+
+
+# ═══════════════════════════════════════════════════════════
 # PERMISSION SYSTEM
 # ═══════════════════════════════════════════════════════════
 
@@ -4656,6 +4827,7 @@ HELP_TEXT = f"""
  {s('/config', Style.BRIGHT_YELLOW)} [k=v]  查看/设置配置项
  {s('/copy', Style.BRIGHT_YELLOW)}          复制最近回复到剪贴板
  {s('/revert', Style.BRIGHT_YELLOW)} <file> 从最近检查点恢复单个文件
+ {s('/cat', Style.BRIGHT_YELLOW)} <path>    全屏查看文件（语法高亮+行号）
  {s('/quit', Style.BRIGHT_YELLOW)}          退出
 {s('─'*58, Style.CYAN)}
  快捷: 直接输入文字对话; 多行文本以 \\ 结尾; 空行发送; Tab 补全斜杠命令
@@ -4667,7 +4839,7 @@ SLASH_COMMANDS = ["/help", "/model", "/models", "/mode", "/perm", "/risk", "/bud
                   "/undo", "/verify", "/web", "/search", "/proj", "/tree", "/sym",
                   "/find", "/grep", "/stat", "/diff", "/branch", "/export", "/clear",
                   "/compact", "/session", "/cost", "/health", "/quit", "/exit",
-                  "/last", "/theme", "/config", "/copy", "/revert"]
+                  "/last", "/theme", "/config", "/copy", "/revert", "/cat"]
 
 
 class CLI:
@@ -4998,11 +5170,18 @@ class CLI:
             elif cmd == "/diff":
                 parts = rest.split()
                 if len(parts) >= 2:
-                    print(agent.tools.execute("diff_show", {"path_a": parts[0], "path_b": parts[1]}))
+                    out = str(agent.tools.execute("diff_show", {"path_a": parts[0], "path_b": parts[1]}))
+                    Pager.view_text(f"diff {parts[0]} ↔ {parts[1]}", out, line_numbers=True, highlight="diff")
                 elif len(parts) == 1:
-                    print(agent.tools.execute("diff_show", {"path_a": parts[0], "path_b": parts[0] + ".bak"}))
+                    out = str(agent.tools.execute("diff_show", {"path_a": parts[0], "path_b": parts[0] + ".bak"}))
+                    Pager.view_text(f"diff {parts[0]}", out, line_numbers=True, highlight="diff")
                 else:
-                    TUI.diff_out(agent.checkpoints.diff())
+                    out = agent.checkpoints.diff()
+                    Pager.view_text("checkpoint diff", out, line_numbers=True, highlight="diff")
+                return True
+            elif cmd == "/cat":
+                if not rest: TUI.error("用法: /cat <path>"); return True
+                Pager.view_file(rest)
                 return True
             elif cmd == "/tools":
                 rows = [[name, schema["function"]["description"][:70]]
@@ -5046,6 +5225,10 @@ class CLI:
                 self._copy_cmd(); return True
             elif cmd == "/revert":
                 self._revert_cmd(rest, agent); return True
+            elif cmd == "/cat":
+                if not rest: TUI.error("用法: /cat <path>"); return True
+                Pager.view_file(rest)
+                return True
             else:
                 TUI.warn(f"未知命令 {cmd}，输入 /help")
         except Exception as e:
@@ -5063,10 +5246,21 @@ class CLI:
         results = getattr(agent, "_last_tool_results", [])
         if not results:
             TUI.dim("还没有工具输出"); return
-        shown = results[-n:]
-        for name, output in shown:
-            TUI.section(f"last: {name}")
-            TUI.tool_out(output, max_lines=50)
+        if n == 1:
+            # open the most recent output in the full-screen pager
+            name, output = results[-1]
+            lines = str(output).splitlines()
+            if lines and lines[0].lstrip().startswith(("{", "[")):
+                try:
+                    lines = json.dumps(json.loads(str(output)), ensure_ascii=False, indent=2).splitlines()
+                except Exception:
+                    pass
+            Pager(title=f"last: {name}", lines=lines, line_numbers=True).view()
+        else:
+            shown = results[-n:]
+            for name, output in shown:
+                TUI.section(f"last: {name}")
+                TUI.tool_out(output, max_lines=50)
 
     def _theme_cmd(self, rest):
         """Switch color theme."""
@@ -5882,6 +6076,30 @@ def run_selftest() -> int:
     # fuzzy filter with CJK
     check("fuzzy_filter CJK", _fuzzy_filter("主题", ["/theme 主题", "/help"])[0] == "/theme 主题",
           str(_fuzzy_filter("主题", ["/theme 主题", "/help"])))
+
+    # ── v8.1: Pager ─────────────────────────────────────
+    TUI.section("8.1 · Pager")
+    _pg_out = _FakeTTY()
+    _old_out2 = sys.stdout
+    sys.stdout = _pg_out
+    try:
+        # non-TTY fallback prints first N lines
+        Pager(title="test", lines=[f"line {i}" for i in range(50)]).view(max_non_tty=10)
+    finally:
+        sys.stdout = _old_out2
+    _pg_text = _pg_out.text()
+    check("Pager non-TTY prints limited lines", "line 0" in _pg_text and "line 9" in _pg_text
+          and "line 20" not in _pg_text, repr(_pg_text[:60]))
+    check("Pager non-TTY shows more-hint", "more lines" in _pg_text, repr(_pg_text[-60:]))
+    # view_text with diff highlight
+    _pg_out2 = _FakeTTY()
+    sys.stdout = _pg_out2
+    try:
+        Pager.view_text("d", "--- a\n+++ b\n-old\n+new\n", highlight="diff")
+    finally:
+        sys.stdout = _old_out2
+    check("Pager view_text renders", "a" in _pg_out2.text() or "-old" in _pg_out2.text(),
+          repr(_pg_out2.text()[:60]))
 
     # ── v8: CJK/emoji width safety ──────────────────────
     TUI.section("8 · CJK/emoji width safety")
