@@ -24,7 +24,7 @@ try:
 except ImportError:
     readline = None
 
-__version__ = "8.1.0"
+__version__ = "8.1.1"
 APP_DIR = Path.home() / ".nvidia_engineer_pro"
 SESSIONS_DIR = APP_DIR / "sessions"
 CHECKPOINTS_DIR = APP_DIR / "checkpoints"
@@ -2588,23 +2588,6 @@ class MemorySystem:
         except Exception:
             return "# Memory Index\n"
 
-    def list_topics(self) -> list:
-        """Return [(topic, size_bytes, mtime)] sorted by mtime desc."""
-        out = []
-        try:
-            for p in self.mem_dir.glob("*.md"):
-                if p.name == "MEMORY.md":
-                    continue
-                try:
-                    st = p.stat()
-                    out.append((p.stem, st.st_size, st.st_mtime))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        out.sort(key=lambda x: -x[2])
-        return out
-
     def read(self, topic: str) -> str:
         safe = re.sub(r"[^\w\-]", "_", topic)[:80]
         path = self.mem_dir / f"{safe}.md"
@@ -3439,6 +3422,8 @@ class ToolEngine:
 
     def tool_file_stat(self, path: str) -> str:
         p = self._resolve(path)
+        if p.is_symlink() and not p.exists():
+            raise ToolError(f"broken symlink: {path} -> {os.readlink(p)}")
         if not p.exists(): raise ToolError(f"not found: {path}")
         st = p.stat()
         kind = "dir" if p.is_dir() else "file" if p.is_file() else "other"
@@ -3483,17 +3468,23 @@ class ToolEngine:
             if lvl > depth: return
             try:
                 entries = sorted(d.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-            except PermissionError:
+            except (PermissionError, OSError):
                 out.append(prefix + "[permission denied]"); return
             for e in entries:
                 if not show_hidden and e.name.startswith("."): continue
                 if e.name in SKIP_DIRS or e.name.endswith((".bak",)): continue
-                if e.is_dir():
-                    out.append(prefix + e.name + "/")
-                    walk(e, prefix + "  ", lvl + 1)
-                else:
-                    size = e.stat().st_size
-                    out.append(f"{prefix}{e.name}  ({size}B)")
+                try:
+                    if e.is_symlink() and not e.exists():
+                        out.append(prefix + e.name + " -> (broken)")
+                        continue
+                    if e.is_dir():
+                        out.append(prefix + e.name + "/")
+                        walk(e, prefix + "  ", lvl + 1)
+                    else:
+                        size = e.stat().st_size
+                        out.append(f"{prefix}{e.name}  ({size}B)")
+                except OSError:
+                    out.append(prefix + e.name + " [error]")
         walk(base, "", 0)
         return _clip("\n".join(out) or "(empty)")
 
@@ -3509,7 +3500,7 @@ class ToolEngine:
                 return
             try:
                 entries = sorted(d.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-            except PermissionError:
+            except (PermissionError, OSError):
                 out.append(prefix + "[permission denied]"); return
             for i, e in enumerate(entries):
                 if count[0] >= max_entries:
@@ -3519,15 +3510,21 @@ class ToolEngine:
                 last = i == len(entries) - 1
                 branch = "└─ " if last else "├─ "
                 nxt = "   " if last else "│  "
-                if e.is_dir():
-                    out.append(f"{prefix}{branch}{e.name}/")
-                    walk(e, prefix + nxt, lvl + 1)
-                else:
-                    count[0] += 1
-                    size = e.stat().st_size
-                    unit = "B" if size < 1024 else "K" if size < 1024**2 else "M"
-                    val = size if size < 1024 else size / (1024 if unit == "K" else 1024**2)
-                    out.append(f"{prefix}{branch}{e.name}  ({val:.0f}{unit})")
+                try:
+                    if e.is_symlink() and not e.exists():
+                        out.append(f"{prefix}{branch}{e.name} -> (broken)")
+                        continue
+                    if e.is_dir():
+                        out.append(f"{prefix}{branch}{e.name}/")
+                        walk(e, prefix + nxt, lvl + 1)
+                    else:
+                        count[0] += 1
+                        size = e.stat().st_size
+                        unit = "B" if size < 1024 else "K" if size < 1024**2 else "M"
+                        val = size if size < 1024 else size / (1024 if unit == "K" else 1024**2)
+                        out.append(f"{prefix}{branch}{e.name}  ({val:.0f}{unit})")
+                except OSError:
+                    out.append(f"{prefix}{branch}{e.name} [error]")
         walk(base, "", 0)
         return _clip("\n".join(out))
 
@@ -3877,11 +3874,16 @@ class ToolEngine:
         key_files, code_files, tests = [], [], []
         for f in base.rglob("*"):
             if any(part in SKIP_DIRS for part in f.parts): continue
-            if f.is_dir():
-                stats["dirs"] += 1; continue
-            if stats["files"] >= max_files: break
-            stats["files"] += 1
-            size = f.stat().st_size
+            try:
+                if f.is_symlink() and not f.exists():
+                    continue  # skip broken symlinks
+                if f.is_dir():
+                    stats["dirs"] += 1; continue
+                if stats["files"] >= max_files: break
+                stats["files"] += 1
+                size = f.stat().st_size
+            except OSError:
+                continue  # unreadable entry (broken symlink, permission, etc.)
             stats["total_bytes"] += size
             ext = f.suffix or "(none)"
             stats["by_ext"][ext] = stats["by_ext"].get(ext, 0) + 1
@@ -5371,18 +5373,15 @@ class CLI:
             TUI.ok(f"主题已切换到 {rest}")
         elif rest == "list":
             print()
+            saved = Palette.get_theme()
             for tn in Palette.themes():
-                marker = " ●" if tn == Palette.get_theme() else "  "
-                sample = s("████ ", Palette.tok("accent")) + s("████ ", Palette.tok("ok")) + \
-                         s("████ ", Palette.tok("warn")) + s("████", Palette.tok("err"))
-                # temporarily switch to show each theme's colors
-                saved = Palette.get_theme()
+                marker = " ●" if tn == saved else "  "
                 Palette.set_theme(tn)
                 sample = s("████ ", Palette.tok("accent")) + s("████ ", Palette.tok("ok")) + \
                          s("████ ", Palette.tok("warn")) + s("████", Palette.tok("err"))
-                Palette.set_theme(saved)
-                cur = " (当前)" if tn == Palette.get_theme() else ""
+                cur = " (当前)" if tn == saved else ""
                 print(f"  {s(marker, Palette.tok('accent'))} {tn:<12s} {sample}{cur}")
+            Palette.set_theme(saved)
             print()
             TUI.dim(f"用法: /theme <{'|'.join(Palette.themes())}>")
         else:
@@ -5822,6 +5821,16 @@ def run_selftest() -> int:
 
         out = eng.execute("list_dir", {"path": "."})
         check("list_dir", "a.txt" in out, out[:120])
+
+        # broken symlink must not crash list_dir/tree/analyze
+        os.symlink("/nonexistent/target", td / "broken_link")
+        out = eng.execute("list_dir", {"path": "."})
+        check("list_dir handles broken symlink", "broken" in out, out[:120])
+        out = eng.execute("tree", {"path": "."})
+        check("tree handles broken symlink", "broken" in out, out[:120])
+        out = eng.execute("analyze_project", {"path": "."})
+        check("analyze_project handles broken symlink", isinstance(out, str), str(out)[:80])
+        os.unlink(td / "broken_link")
 
         out = eng.execute("glob", {"pattern": "*.txt"})
         check("glob", "a.txt" in out, out[:120])
