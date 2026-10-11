@@ -1232,16 +1232,32 @@ class TUI:
     @staticmethod
     def todos(todos):
         if not todos:
+            TUI.dim("(无待办)")
             return
         print()
+        done = sum(1 for t in todos if isinstance(t, dict) and t.get("status") == "done")
+        total = len(todos)
+        # progress bar header
+        bar = TUI.progress(done * 100 // total if total else 0, width=16)
+        print(s("  ", Style.DIM) + s("📋 ", Palette.tok("dec")) + bar
+              + s(f"  {done}/{total}", Palette.tok("dim")))
+        print(s("  " + "─" * 40, Palette.tok("border")))
         for i, t in enumerate(todos, 1):
             if isinstance(t, dict):
                 status = t.get("status", "pending")
                 desc = t.get("desc") or t.get("description") or str(t)
             else:
                 status, desc = "pending", str(t)
-            icon = {"done": "✅", "in_progress": "🔄"}.get(status, "⬜")
-            print(s(f"    {icon} {desc}", Style.BRIGHT_CYAN))
+            if status == "done":
+                icon, col = s("✔", Palette.tok("ok")), Palette.tok("dim")
+                desc_st = s(desc, Palette.tok("dim"))
+            elif status == "in_progress":
+                icon, col = s("▸", Palette.tok("warn")), Palette.tok("warn")
+                desc_st = s(desc, Palette.tok("fg"), Style.BOLD)
+            else:
+                icon, col = s("○", Palette.tok("dim")), Palette.tok("dim")
+                desc_st = s(desc, Palette.tok("fg"))
+            print(s(f"  {i:>2}. ", Palette.tok("dim")) + icon + " " + desc_st)
         print()
     @staticmethod
     def status_bar(session, budget=None, elapsed=None):
@@ -1285,6 +1301,32 @@ class TUI:
             plain_clipped = clip(plain, term_w - 4)
             body = s(plain_clipped, Palette.tok("dim"))
         print(s("  ", Style.DIM) + body)
+    @staticmethod
+    def timeline(records):
+        """Render checkpoint records as a vertical timeline."""
+        if not records:
+            TUI.dim("(无检查点)")
+            return
+        print()
+        for i, r in enumerate(records):
+            is_last = (i == len(records) - 1)
+            connector = "└─" if is_last else "├─"
+            cid = r.get("id", "?")[:8]
+            label = r.get("label", "")[:30]
+            files = r.get("files", 0)
+            ts = (r.get("ts", "") or "")[11:19]
+            dot = s("●", Palette.tok("accent"))
+            if is_last:
+                line = s(f"  {connector} ", Palette.tok("border")) + dot
+            else:
+                line = s(f"  {connector} ", Palette.tok("border")) + s("○", Palette.tok("dim"))
+            line += s(f" {cid}", Style.BOLD, Palette.tok("fn"))
+            line += s(f"  {label}", Palette.tok("fg"))
+            meta = s(f"  {files} files  {ts}", Palette.tok("dim"))
+            print(line + meta)
+            if not is_last:
+                print(s("  │", Palette.tok("border")))
+        print()
 
 class Spinner:
     """Single-line stderr spinner.
@@ -2549,6 +2591,23 @@ class MemorySystem:
             return self.index_path.read_text(encoding="utf-8")
         except Exception:
             return "# Memory Index\n"
+
+    def list_topics(self) -> list:
+        """Return [(topic, size_bytes, mtime)] sorted by mtime desc."""
+        out = []
+        try:
+            for p in self.mem_dir.glob("*.md"):
+                if p.name == "MEMORY.md":
+                    continue
+                try:
+                    st = p.stat()
+                    out.append((p.stem, st.st_size, st.st_mtime))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        out.sort(key=lambda x: -x[2])
+        return out
 
     def read(self, topic: str) -> str:
         safe = re.sub(r"[^\w\-]", "_", topic)[:80]
@@ -5101,7 +5160,21 @@ class CLI:
                 elif rest:
                     print(agent.memory.read(rest))
                 else:
-                    print(agent.memory.read_index())
+                    topics = agent.memory.list_topics()
+                    if not topics:
+                        TUI.dim("(无记忆主题)")
+                    else:
+                        print()
+                        for i, (topic, size, mt) in enumerate(topics[:20], 1):
+                            ts = datetime.fromtimestamp(mt).strftime("%m-%d %H:%M")
+                            print(s(f"  {i:>2}. ", Palette.tok("dim"))
+                                  + s(topic, Palette.tok("fn"), Style.BOLD)
+                                  + s(f"  {size}B", Palette.tok("dim"))
+                                  + s(f"  {ts}", Palette.tok("dim")))
+                        if len(topics) > 20:
+                            TUI.dim(f"  … +{len(topics)-20} more")
+                        print()
+                        TUI.dim("用法: /memory <topic>  /memory find <q>  /memory del <topic>")
                 return True
             elif cmd == "/skills":
                 print(agent.skills.get_skill_index() or "no skills"); return True
@@ -5122,14 +5195,14 @@ class CLI:
                     ok, msg = agent.checkpoints.restore(cp_id or None)
                     TUI.ok(msg) if ok else TUI.error(msg)
                 elif action == "diff":
-                    TUI.diff_out(agent.checkpoints.diff(cp_id or None))
+                    out = agent.checkpoints.diff(cp_id or None)
+                    Pager.view_text("checkpoint diff", out, line_numbers=True, highlight="diff")
                 elif action == "prune":
                     n = agent.checkpoints.prune(keep=int(cp_id) if cp_id.isdigit() else 25)
                     TUI.ok(f"已清理 {n} 个旧检查点")
                 else:
-                    rows = [[r['id'], r.get('label','')[:34], str(r.get('files',0)),
-                             (r.get('ts','') or '')[11:19]] for r in agent.checkpoints.list(15)]
-                    TUI.table(["ID", "LABEL", "FILES", "TIME"], rows)
+                    records = agent.checkpoints.list(15)
+                    TUI.timeline(records)
                 return True
             elif cmd == "/undo":
                 ok, msg = agent.checkpoints.restore()
@@ -5479,9 +5552,24 @@ class CLI:
         sub = rest.split()
         if not sub or sub[0] == "ls":
             sessions = Session.list_all()[:15]
+            print()
             for s_ in sessions:
-                marker = "*" if s_.id == self.session.id else " "
-                print(f"   {marker} {s_.id}  {s_.model}  msgs={len(s_.messages)}  {s_.updated[:19] if s_.updated else ''}")
+                marker = s(" ●", Palette.tok("accent")) if s_.id == self.session.id else s("  ", Palette.tok("dim"))
+                msgs = len(s_.messages)
+                updated = (s_.updated or "")[:16].replace("T", " ")
+                preview = ""
+                for m in reversed(s_.messages):
+                    if m.get("role") == "user" and m.get("content"):
+                        preview = clip(str(m["content"]), 34)
+                        break
+                print(marker + s(f" {s_.id}", Style.BOLD, Palette.tok("fn"))
+                      + s(f"  {s_.model[:24]}", Palette.tok("dim"))
+                      + s(f"  {msgs} msgs", Palette.tok("warn"))
+                      + s(f"  {updated}", Palette.tok("dim")))
+                if preview:
+                    print(s("     ", Palette.tok("dim")) + s(preview, Palette.tok("quote")))
+            print()
+            TUI.dim("用法: /session load <id> | new")
             return
         if sub[0] == "new":
             self.session.save()
@@ -6100,6 +6188,32 @@ def run_selftest() -> int:
         sys.stdout = _old_out2
     check("Pager view_text renders", "a" in _pg_out2.text() or "-old" in _pg_out2.text(),
           repr(_pg_out2.text()[:60]))
+
+    # ── v8.1: todos / timeline / session UI ─────────────
+    TUI.section("8.1 · Todos/timeline/session UI")
+    _td_out = _FakeTTY()
+    sys.stdout = _td_out
+    try:
+        TUI.todos([{"desc": "task a", "status": "done"},
+                   {"desc": "task b", "status": "in_progress"},
+                   {"desc": "task c", "status": "pending"}])
+    finally:
+        sys.stdout = _old_out2
+    _td_text = _td_out.text()
+    check("todos shows progress bar", "█" in _td_text or "░" in _td_text, repr(_td_text[:40]))
+    check("todos marks done with check", "✔" in _td_text, repr(_td_text[:80]))
+    check("todos counts 1/3", "1/3" in _td_text, repr(_td_text[:120]))
+    _tl_out = _FakeTTY()
+    sys.stdout = _tl_out
+    try:
+        TUI.timeline([{"id": "abc12345", "label": "first", "files": 3, "ts": "2026-01-01T10:00:00"},
+                      {"id": "def67890", "label": "second", "files": 5, "ts": "2026-01-01T11:00:00"}])
+    finally:
+        sys.stdout = _old_out2
+    _tl_text = _tl_out.text()
+    check("timeline renders connector", "├─" in _tl_text or "└─" in _tl_text, repr(_tl_text[:40]))
+    check("timeline shows ids", "abc12345" in _tl_text, repr(_tl_text[:80]))
+    check("timeline shows file counts", "3 files" in _tl_text, repr(_tl_text[:120]))
 
     # ── v8: CJK/emoji width safety ──────────────────────
     TUI.section("8 · CJK/emoji width safety")
