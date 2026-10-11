@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.gguf
+*.log
+*.bak
+.env
+.DS_Store
+.nengineer/
